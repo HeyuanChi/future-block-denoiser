@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from dataclasses import dataclass
+from dataclasses import fields
 from pathlib import Path
 import sys
 from typing import Any
@@ -27,6 +28,7 @@ from src.utils.noise_schedule import DiffusionNoiseSchedule
 @dataclass
 class DenoiserTrainConfig:
     ae_checkpoint_path: str = "outputs/checkpoints/ae_best.pt"
+    resume_from_checkpoint: str | None = None
     learning_rate: float = 1e-4
     weight_decay: float = 0.0
     num_epochs: int = 5
@@ -39,7 +41,9 @@ class DenoiserTrainConfig:
     @classmethod
     def from_dict(cls, config: dict[str, Any]) -> "DenoiserTrainConfig":
         train_config = config.get("training", config)
-        return cls(**train_config)
+        valid_keys = {field.name for field in fields(cls)}
+        filtered_config = {key: value for key, value in train_config.items() if key in valid_keys}
+        return cls(**filtered_config)
 
 
 def load_autoencoder(
@@ -163,6 +167,30 @@ def append_epoch_log(
         file.write(json.dumps(log_record) + "\n")
 
 
+def load_denoiser_checkpoint(
+    checkpoint_path: str,
+    prefix_encoder: PrefixEncoder,
+    denoiser: LatentDenoiser,
+    optimizer: torch.optim.Optimizer | None,
+    device: torch.device,
+) -> tuple[int, float, bool]:
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    prefix_encoder.load_state_dict(checkpoint["prefix_encoder_state_dict"])
+    denoiser.load_state_dict(checkpoint["denoiser_state_dict"])
+
+    optimizer_loaded = False
+    if optimizer is not None and "optimizer_state_dict" in checkpoint:
+        try:
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            optimizer_loaded = True
+        except ValueError:
+            optimizer_loaded = False
+
+    start_epoch = int(checkpoint.get("epoch", 0)) + 1
+    best_val_loss = float(checkpoint.get("val_loss", float("inf")))
+    return start_epoch, best_val_loss, optimizer_loaded
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="configs/denoiser.yaml")
@@ -204,12 +232,26 @@ def main() -> None:
         weight_decay=train_config.weight_decay,
     )
 
+    start_epoch = 1
     best_val_loss = float("inf")
     checkpoint_dir = Path(train_config.checkpoint_dir)
     log_path = Path(train_config.log_dir) / "denoiser_train.jsonl"
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    for epoch in range(1, train_config.num_epochs + 1):
+    if train_config.resume_from_checkpoint is not None:
+        start_epoch, best_val_loss, optimizer_loaded = load_denoiser_checkpoint(
+            checkpoint_path=train_config.resume_from_checkpoint,
+            prefix_encoder=prefix_encoder,
+            denoiser=denoiser,
+            optimizer=optimizer,
+            device=device,
+        )
+        print(f"Resuming from checkpoint: {train_config.resume_from_checkpoint}")
+        print(f"Starting at epoch {start_epoch}")
+        if not optimizer_loaded:
+            print("Optimizer state could not be restored exactly. Continuing with a fresh optimizer state.")
+
+    for epoch in range(start_epoch, train_config.num_epochs + 1):
         print(f"Epoch {epoch}/{train_config.num_epochs}")
         train_loss = run_epoch(
             autoencoder=autoencoder,
