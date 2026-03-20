@@ -57,6 +57,8 @@ python scripts/test_dataset.py
 python -m src.training.train_ae --config configs/ae.yaml
 ```
 
+Metrics are appended to `outputs/logs/ae_train.jsonl`.
+
 ## Train The Denoiser
 
 Train the autoencoder first so `outputs/checkpoints/ae_best.pt` exists.
@@ -64,3 +66,5 @@ Train the autoencoder first so `outputs/checkpoints/ae_best.pt` exists.
 ```bash
 python -m src.training.train_denoiser --config configs/denoiser.yaml
 ```
+
+Metrics are appended to `outputs/logs/denoiser_train.jsonl`.

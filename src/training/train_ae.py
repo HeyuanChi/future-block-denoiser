@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 import sys
 from dataclasses import dataclass
@@ -27,6 +28,7 @@ class TrainConfig:
     device: str = "auto"
     log_every: int = 100
     checkpoint_dir: str = "outputs/checkpoints"
+    log_dir: str = "outputs/logs"
     save_every_epoch: bool = True
 
     @classmethod
@@ -127,6 +129,24 @@ def save_checkpoint(
     )
 
 
+def append_epoch_log(
+    log_path: Path,
+    epoch: int,
+    train_loss: float,
+    val_loss: float,
+    device: torch.device,
+) -> None:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_record = {
+        "epoch": epoch,
+        "train_loss": train_loss,
+        "val_loss": val_loss,
+        "device": str(device),
+    }
+    with open(log_path, "a", encoding="utf-8") as file:
+        file.write(json.dumps(log_record) + "\n")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="configs/ae.yaml")
@@ -154,6 +174,8 @@ def main() -> None:
 
     best_val_loss = float("inf")
     checkpoint_dir = Path(train_config.checkpoint_dir)
+    log_path = Path(train_config.log_dir) / "ae_train.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
 
     for epoch in range(1, train_config.num_epochs + 1):
         print(f"Epoch {epoch}/{train_config.num_epochs}")
@@ -176,6 +198,13 @@ def main() -> None:
 
         print(f"train_loss: {train_loss:.4f}")
         print(f"val_loss:   {val_loss:.4f}")
+        append_epoch_log(
+            log_path=log_path,
+            epoch=epoch,
+            train_loss=train_loss,
+            val_loss=val_loss,
+            device=device,
+        )
 
         if train_config.save_every_epoch:
             save_checkpoint(

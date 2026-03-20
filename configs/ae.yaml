@@ -26,4 +26,5 @@ training:
   device: auto
   log_every: 100
   checkpoint_dir: outputs/checkpoints
+  log_dir: outputs/logs
   save_every_epoch: true
