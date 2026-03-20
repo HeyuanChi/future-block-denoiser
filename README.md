@@ -2,12 +2,13 @@
 
 Minimal Stage 1 prototype for an NLP seminar project on non-traditional next-token generation.
 
-The current codebase only implements:
+The current codebase now implements:
 
 - WikiText-2 raw dataset loading and fixed-window slicing
 - A future-block autoencoder with a frozen BERT-based encoder
 - A lightweight Transformer decoder for token reconstruction
 - A plain PyTorch training script for the autoencoder
+- A prefix-conditioned latent denoiser trained against AE latents
 
 ## Project Structure
 
@@ -54,4 +55,12 @@ python scripts/test_dataset.py
 
 ```bash
 python -m src.training.train_ae --config configs/ae.yaml
+```
+
+## Train The Denoiser
+
+Train the autoencoder first so `outputs/checkpoints/ae_best.pt` exists.
+
+```bash
+python -m src.training.train_denoiser --config configs/denoiser.yaml
 ```

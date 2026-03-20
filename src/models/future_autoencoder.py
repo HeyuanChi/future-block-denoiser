@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import fields
 from typing import Any
 
 import torch
@@ -21,7 +22,9 @@ class FutureAutoencoderConfig:
     @classmethod
     def from_dict(cls, config: dict[str, Any]) -> "FutureAutoencoderConfig":
         model_config = config.get("model", config)
-        return cls(**model_config)
+        valid_keys = {field.name for field in fields(cls)}
+        filtered_config = {key: value for key, value in model_config.items() if key in valid_keys}
+        return cls(**filtered_config)
 
 
 class FutureAutoencoder(nn.Module):
@@ -40,11 +43,10 @@ class FutureAutoencoder(nn.Module):
         super().__init__()
         self.config = config
 
-        bert = BertModel.from_pretrained(config.bert_name)
-        self.bert_embeddings = bert.embeddings
-        self.future_encoder_layers = nn.ModuleList(bert.encoder.layer[:2])
-        hidden_size = bert.config.hidden_size
-        vocab_size = bert.config.vocab_size
+        self.future_encoder = BertModel.from_pretrained(config.bert_name)
+        self.future_encoder.encoder.layer = nn.ModuleList(self.future_encoder.encoder.layer[:2])
+        hidden_size = self.future_encoder.config.hidden_size
+        vocab_size = self.future_encoder.config.vocab_size
 
         self.latent_projection = nn.Linear(hidden_size, config.latent_dim)
         self.latent_to_hidden = nn.Linear(config.latent_dim, hidden_size)
@@ -67,11 +69,8 @@ class FutureAutoencoder(nn.Module):
         self.lm_head = nn.Linear(hidden_size, vocab_size)
 
     def freeze_bert_backbone(self) -> None:
-        for parameter in self.bert_embeddings.parameters():
+        for parameter in self.future_encoder.parameters():
             parameter.requires_grad = False
-        for layer in self.future_encoder_layers:
-            for parameter in layer.parameters():
-                parameter.requires_grad = False
 
     def encode_future(
         self,
@@ -85,14 +84,11 @@ class FutureAutoencoder(nn.Module):
         Returns:
             latent: [B, S, latent_dim]
         """
-        hidden_states = self.bert_embeddings(input_ids=future_ids)
-        extended_mask = future_mask[:, None, None, :].to(dtype=hidden_states.dtype)
-        extended_mask = (1.0 - extended_mask) * torch.finfo(hidden_states.dtype).min
-
-        for layer in self.future_encoder_layers:
-            hidden_states = layer(hidden_states, attention_mask=extended_mask)[0]
-
-        latent = self.latent_projection(hidden_states)
+        encoder_outputs = self.future_encoder(
+            input_ids=future_ids,
+            attention_mask=future_mask,
+        )
+        latent = self.latent_projection(encoder_outputs.last_hidden_state)
         return latent
 
     def decode_latent(

@@ -1,13 +1,32 @@
-# Placeholder for Stage 2.
-# We keep this file so the requested project structure is complete,
-# but denoiser training is intentionally not implemented in Stage 1.
-
 data:
+  dataset_name: Salesforce/wikitext
+  dataset_config: wikitext-2-raw-v1
+  tokenizer_name: bert-base-uncased
   prefix_len: 64
   future_len: 16
+  stride: 16
+  batch_size: 8
+  num_workers: 0
+  max_train_samples: null
+  max_val_samples: null
 
 model:
+  bert_name: bert-base-uncased
   latent_dim: 256
+  prefix_len: 64
+  future_len: 16
+  num_diffusion_steps: 100
+  denoiser_layers: 4
+  denoiser_heads: 8
+  denoiser_ffn_dim: 1024
+  denoiser_dropout: 0.1
 
 training:
+  ae_checkpoint_path: outputs/checkpoints/ae_best.pt
+  learning_rate: 0.0001
+  weight_decay: 0.0
+  num_epochs: 5
   device: cuda
+  log_every: 100
+  checkpoint_dir: outputs/checkpoints
+  save_every_epoch: true
