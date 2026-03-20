@@ -1,18 +1,57 @@
 # Future Block Denoiser
 
-Seminar project on multi-token future block prediction with prefix-conditioned iterative latent denoising.
+Minimal Stage 1 prototype for an NLP seminar project on non-traditional next-token generation.
 
-## Goal
-This project studies whether a fixed future token block can be generated with fewer sequential steps than standard autoregressive decoding by iteratively denoising a learned latent representation.
+The current codebase only implements:
 
-## Current plan
-- Stage 1: train a BERT-initialized future-block autoencoder
-- Stage 2: train a prefix-conditioned latent denoiser
-- Compare against autoregressive and direct block prediction baselines
+- WikiText-2 raw dataset loading and fixed-window slicing
+- A future-block autoencoder with a frozen BERT-based encoder
+- A lightweight Transformer decoder for token reconstruction
+- A plain PyTorch training script for the autoencoder
 
-## Structure
-- `src/data`: dataset and preprocessing
-- `src/models`: model definitions
-- `src/training`: training scripts
-- `configs`: experiment configs
-- `outputs`: checkpoints and logs
+## Project Structure
+
+```text
+future-block-denoiser/
+├── README.md
+├── requirements.txt
+├── configs/
+│   ├── ae.yaml
+│   └── denoiser.yaml
+├── src/
+│   ├── data/
+│   │   ├── __init__.py
+│   │   └── dataset.py
+│   ├── models/
+│   │   ├── __init__.py
+│   │   └── future_autoencoder.py
+│   ├── training/
+│   │   ├── __init__.py
+│   │   └── train_ae.py
+│   └── utils/
+│       ├── __init__.py
+│       └── metrics.py
+├── scripts/
+│   └── test_dataset.py
+└── outputs/
+    ├── checkpoints/
+    └── logs/
+```
+
+## Install
+
+```bash
+pip install -r requirements.txt
+```
+
+## Test The Dataset
+
+```bash
+python scripts/test_dataset.py
+```
+
+## Train The Autoencoder
+
+```bash
+python -m src.training.train_ae --config configs/ae.yaml
+```

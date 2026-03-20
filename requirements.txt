@@ -1,8 +1,5 @@
 torch
 transformers
 datasets
-numpy
 pyyaml
 tqdm
-scikit-learn
-safetensors

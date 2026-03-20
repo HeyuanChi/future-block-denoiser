@@ -1,0 +1,13 @@
+# Placeholder for Stage 2.
+# We keep this file so the requested project structure is complete,
+# but denoiser training is intentionally not implemented in Stage 1.
+
+data:
+  prefix_len: 64
+  future_len: 16
+
+model:
+  latent_dim: 256
+
+training:
+  device: cuda

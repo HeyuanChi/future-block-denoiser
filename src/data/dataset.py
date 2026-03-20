@@ -1,0 +1,156 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+import torch
+from datasets import load_dataset
+from torch.utils.data import DataLoader, Dataset
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
+
+
+@dataclass
+class DataConfig:
+    dataset_name: str = "Salesforce/wikitext"
+    dataset_config: str = "wikitext-2-raw-v1"
+    tokenizer_name: str = "bert-base-uncased"
+    prefix_len: int = 64
+    future_len: int = 16
+    stride: int = 16
+    batch_size: int = 8
+    num_workers: int = 0
+    max_train_samples: int | None = None
+    max_val_samples: int | None = None
+
+    @classmethod
+    def from_dict(cls, config: dict[str, Any]) -> "DataConfig":
+        data_config = config.get("data", config)
+        return cls(**data_config)
+
+    @property
+    def total_len(self) -> int:
+        return self.prefix_len + self.future_len
+
+
+class PrefixFutureDataset(Dataset[dict[str, torch.Tensor]]):
+    """Dataset of fixed windows split into prefix and future blocks."""
+
+    def __init__(
+        self,
+        token_ids: list[int],
+        prefix_len: int,
+        future_len: int,
+        stride: int,
+        max_samples: int | None = None,
+    ) -> None:
+        self.prefix_len = prefix_len
+        self.future_len = future_len
+        self.total_len = prefix_len + future_len
+        self.samples = self._build_samples(
+            token_ids=token_ids,
+            stride=stride,
+            max_samples=max_samples,
+        )
+
+    def _build_samples(
+        self,
+        token_ids: list[int],
+        stride: int,
+        max_samples: int | None,
+    ) -> list[dict[str, torch.Tensor]]:
+        samples: list[dict[str, torch.Tensor]] = []
+
+        max_start = len(token_ids) - self.total_len + 1
+        if max_start <= 0:
+            return samples
+
+        for start in range(0, max_start, stride):
+            window = token_ids[start : start + self.total_len]
+            prefix_ids = torch.tensor(window[: self.prefix_len], dtype=torch.long)
+            future_ids = torch.tensor(window[self.prefix_len :], dtype=torch.long)
+
+            samples.append(
+                {
+                    "prefix_ids": prefix_ids,
+                    "future_ids": future_ids,
+                    "prefix_mask": torch.ones(self.prefix_len, dtype=torch.long),
+                    "future_mask": torch.ones(self.future_len, dtype=torch.long),
+                }
+            )
+
+            if max_samples is not None and len(samples) >= max_samples:
+                break
+
+        return samples
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+        return self.samples[index]
+
+
+def build_tokenizer(tokenizer_name: str) -> PreTrainedTokenizerBase:
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+    # We tokenize a very long concatenated corpus and then slice fixed windows ourselves.
+    # Setting a large max length avoids irrelevant warnings from the tokenizer.
+    tokenizer.model_max_length = 10**9
+    return tokenizer
+
+
+def load_split_texts(dataset_name: str, dataset_config: str, split: str) -> list[str]:
+    dataset = load_dataset(dataset_name, dataset_config, split=split)
+    return [row["text"] for row in dataset if row["text"].strip()]
+
+
+def tokenize_texts(
+    texts: list[str],
+    tokenizer: PreTrainedTokenizerBase,
+) -> list[int]:
+    merged_text = "\n\n".join(texts)
+    encoded = tokenizer(
+        merged_text,
+        add_special_tokens=False,
+        return_attention_mask=False,
+        return_token_type_ids=False,
+    )
+    return list(encoded["input_ids"])
+
+
+def build_dataset(
+    config: DataConfig,
+    split: str,
+    tokenizer: PreTrainedTokenizerBase,
+) -> PrefixFutureDataset:
+    max_samples = config.max_train_samples if split == "train" else config.max_val_samples
+    texts = load_split_texts(config.dataset_name, config.dataset_config, split)
+    token_ids = tokenize_texts(texts, tokenizer)
+    return PrefixFutureDataset(
+        token_ids=token_ids,
+        prefix_len=config.prefix_len,
+        future_len=config.future_len,
+        stride=config.stride,
+        max_samples=max_samples,
+    )
+
+
+def build_dataloaders(
+    config: DataConfig,
+) -> tuple[PreTrainedTokenizerBase, DataLoader[dict[str, torch.Tensor]], DataLoader[dict[str, torch.Tensor]]]:
+    tokenizer = build_tokenizer(config.tokenizer_name)
+    train_dataset = build_dataset(config, split="train", tokenizer=tokenizer)
+    val_dataset = build_dataset(config, split="validation", tokenizer=tokenizer)
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=config.batch_size,
+        shuffle=True,
+        num_workers=config.num_workers,
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=config.batch_size,
+        shuffle=False,
+        num_workers=config.num_workers,
+    )
+    return tokenizer, train_loader, val_loader
