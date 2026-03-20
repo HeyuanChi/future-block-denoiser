@@ -68,3 +68,12 @@ python -m src.training.train_denoiser --config configs/denoiser.yaml
 ```
 
 Metrics are appended to `outputs/logs/denoiser_train.jsonl`.
+
+## Run Inference
+
+```bash
+python scripts/run_inference.py --config configs/denoiser.yaml
+```
+
+This prints a validation prefix, the ground-truth future block, the AE
+reconstruction, and the denoiser-based future prediction.
