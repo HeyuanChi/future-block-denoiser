@@ -5,7 +5,7 @@ data:
   prefix_len: 64
   future_len: 16
   stride: 16
-  batch_size: 8
+  batch_size: 16
   num_workers: 0
   max_train_samples: null
   max_val_samples: null
@@ -23,7 +23,7 @@ training:
   learning_rate: 0.001
   weight_decay: 0.0
   num_epochs: 5
-  device: cuda
+  device: auto
   log_every: 100
   checkpoint_dir: outputs/checkpoints
   save_every_epoch: true

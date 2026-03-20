@@ -29,7 +29,7 @@ class DenoiserTrainConfig:
     learning_rate: float = 1e-4
     weight_decay: float = 0.0
     num_epochs: int = 5
-    device: str = "cuda"
+    device: str = "auto"
     log_every: int = 100
     checkpoint_dir: str = "outputs/checkpoints"
     save_every_epoch: bool = True
@@ -155,6 +155,7 @@ def main() -> None:
     train_config = DenoiserTrainConfig.from_dict(config)
 
     device = resolve_device(train_config.device)
+    print(f"Using device: {device}")
     _, train_loader, val_loader = build_dataloaders(data_config)
 
     autoencoder = load_autoencoder(

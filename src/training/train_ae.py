@@ -24,7 +24,7 @@ class TrainConfig:
     learning_rate: float = 1e-3
     weight_decay: float = 0.0
     num_epochs: int = 5
-    device: str = "cuda"
+    device: str = "auto"
     log_every: int = 100
     checkpoint_dir: str = "outputs/checkpoints"
     save_every_epoch: bool = True
@@ -41,8 +41,19 @@ def load_config(config_path: str) -> dict[str, Any]:
 
 
 def resolve_device(device_name: str) -> torch.device:
-    if device_name == "cuda" and not torch.cuda.is_available():
+    if device_name == "auto":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if torch.backends.mps.is_available():
+            return torch.device("mps")
         return torch.device("cpu")
+
+    if device_name == "cuda":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    if device_name == "mps":
+        return torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+
     return torch.device(device_name)
 
 
@@ -127,6 +138,7 @@ def main() -> None:
     train_config = TrainConfig.from_dict(config)
 
     device = resolve_device(train_config.device)
+    print(f"Using device: {device}")
     _, train_loader, val_loader = build_dataloaders(data_config)
 
     model = FutureAutoencoder(model_config)
