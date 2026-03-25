@@ -46,16 +46,14 @@ def load_denoiser_components(
 
 def iterative_refine_latent(
     denoiser: LatentDenoiser,
+    noise_schedule: DiffusionNoiseSchedule,
     prefix_states: torch.Tensor,
     prefix_mask: torch.Tensor,
     future_mask: torch.Tensor,
     num_steps: int,
 ) -> torch.Tensor:
     """
-    Runs a simple iterative refinement loop.
-
-    We start from Gaussian noise and repeatedly ask the denoiser to map the
-    current latent estimate toward the clean future latent.
+    Runs a deterministic reverse diffusion loop from Gaussian noise.
     """
     batch_size = prefix_states.size(0)
     future_len = future_mask.size(1)
@@ -64,19 +62,18 @@ def iterative_refine_latent(
 
     for timestep in reversed(range(num_steps)):
         timestep_tensor = torch.full((batch_size,), timestep, device=prefix_states.device, dtype=torch.long)
-        predicted_clean = denoiser(
+        predicted_noise = denoiser(
             noisy_latent=latent,
             prefix_states=prefix_states,
             timesteps=timestep_tensor,
             prefix_mask=prefix_mask,
             future_mask=future_mask,
         )
-
-        if timestep > 0:
-            blend = timestep / num_steps
-            latent = blend * latent + (1.0 - blend) * predicted_clean
-        else:
-            latent = predicted_clean
+        latent = noise_schedule.step_ddpm_mean(
+            noisy_latent=latent,
+            predicted_noise=predicted_noise,
+            timesteps=timestep_tensor,
+        )
 
     return latent
 
@@ -135,6 +132,7 @@ def main() -> None:
         )
         denoised_latent = iterative_refine_latent(
             denoiser=denoiser,
+            noise_schedule=noise_schedule,
             prefix_states=prefix_states,
             prefix_mask=batch["prefix_mask"],
             future_mask=batch["future_mask"],
@@ -153,12 +151,17 @@ def main() -> None:
             dtype=torch.long,
         )
         oracle_noisy_latent, _ = noise_schedule.add_noise(target_latent, oracle_timestep)
-        oracle_latent = denoiser(
+        oracle_predicted_noise = denoiser(
             noisy_latent=oracle_noisy_latent,
             prefix_states=prefix_states,
             timesteps=oracle_timestep,
             prefix_mask=batch["prefix_mask"],
             future_mask=batch["future_mask"],
+        )
+        oracle_latent = noise_schedule.predict_clean_from_noise(
+            noisy_latent=oracle_noisy_latent,
+            predicted_noise=oracle_predicted_noise,
+            timesteps=oracle_timestep,
         )
         oracle_logits = autoencoder.decode_latent(
             latent=oracle_latent,

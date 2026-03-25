@@ -91,7 +91,7 @@ def run_epoch(
             )
 
         timesteps = noise_schedule.sample_timesteps(batch["future_ids"].size(0))
-        noisy_latent, _ = noise_schedule.add_noise(clean_latent, timesteps)
+        noisy_latent, target_noise = noise_schedule.add_noise(clean_latent, timesteps)
 
         if is_train:
             optimizer.zero_grad()
@@ -100,7 +100,7 @@ def run_epoch(
             prefix_ids=batch["prefix_ids"],
             prefix_mask=batch["prefix_mask"],
         )
-        predicted_latent = denoiser(
+        predicted_noise = denoiser(
             noisy_latent=noisy_latent,
             prefix_states=prefix_states,
             timesteps=timesteps,
@@ -109,8 +109,8 @@ def run_epoch(
         )
 
         loss_mask = batch["future_mask"].unsqueeze(-1).float()
-        loss = F.mse_loss(predicted_latent * loss_mask, clean_latent * loss_mask, reduction="sum")
-        normalizer = (loss_mask.sum() * predicted_latent.size(-1)).clamp_min(1.0)
+        loss = F.mse_loss(predicted_noise * loss_mask, target_noise * loss_mask, reduction="sum")
+        normalizer = (loss_mask.sum() * predicted_noise.size(-1)).clamp_min(1.0)
         loss = loss / normalizer
 
         if is_train:

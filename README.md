@@ -68,6 +68,7 @@ python -m src.training.train_denoiser --config configs/denoiser.yaml
 ```
 
 Metrics are appended to `outputs/logs/denoiser_train.jsonl`.
+The denoiser is trained to predict diffusion noise in latent space.
 
 To continue denoiser training from an existing checkpoint, set
 `training.resume_from_checkpoint` in `configs/denoiser.yaml`.

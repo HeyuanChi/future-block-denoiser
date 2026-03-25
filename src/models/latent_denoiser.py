@@ -29,7 +29,7 @@ class LatentDenoiserConfig:
 
 class LatentDenoiser(nn.Module):
     """
-    Predicts clean future latents from noisy future latents and prefix states.
+    Predicts diffusion noise for future latents from noisy future latents and prefix states.
 
     Inputs:
         noisy_latent: [B, F, D]
@@ -38,7 +38,7 @@ class LatentDenoiser(nn.Module):
         prefix_mask: [B, P]
         future_mask: [B, F]
     Output:
-        predicted_latent: [B, F, D]
+        predicted_noise: [B, F, D]
     """
 
     def __init__(self, config: LatentDenoiserConfig) -> None:
