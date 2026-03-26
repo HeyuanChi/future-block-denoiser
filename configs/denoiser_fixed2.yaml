@@ -1,7 +1,7 @@
 data:
   dataset_name: Salesforce/wikitext
   dataset_config: wikitext-2-raw-v1
-  tokenizer_name: bert-base-uncased
+  tokenizer_name: roberta-base
   prefix_len: 64
   future_len: 16
   stride: 16
@@ -11,7 +11,7 @@ data:
   max_val_samples: null
 
 model:
-  bert_name: bert-base-uncased
+  bert_name: roberta-base
   latent_dim: 256
   prefix_len: 64
   future_len: 16
