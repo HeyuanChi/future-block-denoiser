@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
+from torch.optim.lr_scheduler import LambdaLR
 import yaml
 from tqdm import tqdm
 
@@ -30,8 +31,8 @@ class TrainConfig:
     checkpoint_dir: str = "outputs/checkpoints"
     log_dir: str = "outputs/logs"
     save_every_epoch: bool = True
-    warm_start_from_checkpoint: str | None = None
     grad_clip_norm: float | None = None
+    warmup_ratio: float = 0.05
 
     @classmethod
     def from_dict(cls, config: dict[str, Any]) -> "TrainConfig":
@@ -73,6 +74,7 @@ def run_epoch(
     dataloader: torch.utils.data.DataLoader,
     device: torch.device,
     optimizer: torch.optim.Optimizer | None,
+    scheduler: LambdaLR | None,
     log_every: int,
     grad_clip_norm: float | None,
 ) -> float:
@@ -103,6 +105,8 @@ def run_epoch(
             if grad_clip_norm is not None:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
             optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
 
         total_loss += loss.item()
         total_batches += 1
@@ -132,17 +136,6 @@ def save_checkpoint(
         },
         checkpoint_path,
     )
-
-
-def load_warm_start_checkpoint(
-    checkpoint_path: str,
-    model: FutureAutoencoder,
-    device: torch.device,
-) -> float:
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    model.load_state_dict(checkpoint["model_state_dict"])
-    return float(checkpoint.get("val_loss", float("inf")))
-
 
 def append_epoch_log(
     log_path: Path,
@@ -187,20 +180,24 @@ def main() -> None:
         weight_decay=train_config.weight_decay,
     )
 
+    total_train_steps = max(len(train_loader) * train_config.num_epochs, 1)
+    warmup_steps = int(total_train_steps * train_config.warmup_ratio)
+
+    def lr_lambda(current_step: int) -> float:
+        if warmup_steps <= 0:
+            return 1.0
+        if current_step < warmup_steps:
+            return float(current_step + 1) / float(warmup_steps)
+        return 1.0
+
+    scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)
+
     best_val_loss = float("inf")
     checkpoint_dir = Path(train_config.checkpoint_dir)
     log_path = Path(train_config.log_dir) / "ae_train.jsonl"
     log_path.parent.mkdir(parents=True, exist_ok=True)
-
-    if train_config.warm_start_from_checkpoint is not None:
-        best_val_loss = load_warm_start_checkpoint(
-            checkpoint_path=train_config.warm_start_from_checkpoint,
-            model=model,
-            device=device,
-        )
-        print(f"Warm-started model weights from: {train_config.warm_start_from_checkpoint}")
-        if best_val_loss != float("inf"):
-            print(f"Initial best_val_loss threshold: {best_val_loss:.4f}")
+    if warmup_steps > 0:
+        print(f"Using linear LR warmup for {warmup_steps} steps ({train_config.warmup_ratio:.1%} of training).")
 
     for epoch in range(1, train_config.num_epochs + 1):
         print(f"Epoch {epoch}/{train_config.num_epochs}")
@@ -209,6 +206,7 @@ def main() -> None:
             dataloader=train_loader,
             device=device,
             optimizer=optimizer,
+            scheduler=scheduler,
             log_every=train_config.log_every,
             grad_clip_norm=train_config.grad_clip_norm,
         )
@@ -219,6 +217,7 @@ def main() -> None:
                 dataloader=val_loader,
                 device=device,
                 optimizer=None,
+                scheduler=None,
                 log_every=train_config.log_every,
                 grad_clip_norm=None,
             )

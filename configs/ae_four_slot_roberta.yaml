@@ -29,5 +29,5 @@ training:
   checkpoint_dir: outputs/checkpoints/ae_four_slot_roberta_stable
   log_dir: outputs/logs/ae_four_slot_roberta_stable
   save_every_epoch: false
-  warm_start_from_checkpoint: outputs/checkpoints/ae_four_slot_roberta/ae_best.pt
   grad_clip_norm: 1.0
+  warmup_ratio: 0.05
