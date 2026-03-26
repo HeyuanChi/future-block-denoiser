@@ -28,4 +28,4 @@ training:
   log_every: 100
   checkpoint_dir: outputs/checkpoints/ae_four_slot_roberta
   log_dir: outputs/logs/ae_four_slot_roberta
-  save_every_epoch: true
+  save_every_epoch: false
