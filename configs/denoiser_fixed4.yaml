@@ -23,13 +23,13 @@ model:
 
 training:
   ae_checkpoint_path: outputs/checkpoints/ae_best.pt
-  denoiser_checkpoint_path: outputs/checkpoints/fixed4/denoiser_best.pt
+  denoiser_checkpoint_path: outputs/checkpoints/fixed4_roberta/denoiser_best.pt
   resume_from_checkpoint: null
   learning_rate: 0.0001
   weight_decay: 0.0
   num_epochs: 100
   device: auto
   log_every: 100
-  checkpoint_dir: outputs/checkpoints/fixed4
-  log_dir: outputs/logs/fixed4
+  checkpoint_dir: outputs/checkpoints/fixed4_roberta
+  log_dir: outputs/logs/fixed4_roberta
   save_every_epoch: true
