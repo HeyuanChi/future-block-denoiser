@@ -45,6 +45,27 @@ class DiffusionNoiseSchedule:
         noisy_latent = torch.sqrt(alpha_bar) * clean_latent + torch.sqrt(1.0 - alpha_bar) * noise
         return noisy_latent, noise
 
+    def add_noise_around_anchor(
+        self,
+        clean_latent: torch.Tensor,
+        anchor_latent: torch.Tensor,
+        timesteps: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Diffuses the residual between an anchor latent and the clean latent.
+
+        Args:
+            clean_latent: [B, F, D]
+            anchor_latent: [B, F, D]
+            timesteps: [B]
+        Returns:
+            noisy_latent: [B, F, D]
+            noise: [B, F, D]
+        """
+        residual = clean_latent - anchor_latent
+        noisy_residual, noise = self.add_noise(residual, timesteps)
+        return anchor_latent + noisy_residual, noise
+
     def predict_clean_from_noise(
         self,
         noisy_latent: torch.Tensor,
@@ -53,6 +74,18 @@ class DiffusionNoiseSchedule:
     ) -> torch.Tensor:
         alpha_bar = self.alpha_bars[timesteps].view(-1, 1, 1)
         return (noisy_latent - torch.sqrt(1.0 - alpha_bar) * predicted_noise) / torch.sqrt(alpha_bar)
+
+    def predict_clean_from_noise_around_anchor(
+        self,
+        noisy_latent: torch.Tensor,
+        anchor_latent: torch.Tensor,
+        predicted_noise: torch.Tensor,
+        timesteps: torch.Tensor,
+    ) -> torch.Tensor:
+        alpha_bar = self.alpha_bars[timesteps].view(-1, 1, 1)
+        residual = noisy_latent - anchor_latent
+        clean_residual = (residual - torch.sqrt(1.0 - alpha_bar) * predicted_noise) / torch.sqrt(alpha_bar)
+        return anchor_latent + clean_residual
 
     def step_ddpm_mean(
         self,
@@ -79,3 +112,18 @@ class DiffusionNoiseSchedule:
         is_not_final = (timesteps > 0).view(-1, 1, 1)
         previous_latent = torch.where(is_not_final, mean, self.predict_clean_from_noise(noisy_latent, predicted_noise, timesteps))
         return previous_latent
+
+    def step_ddpm_mean_around_anchor(
+        self,
+        noisy_latent: torch.Tensor,
+        anchor_latent: torch.Tensor,
+        predicted_noise: torch.Tensor,
+        timesteps: torch.Tensor,
+    ) -> torch.Tensor:
+        residual = noisy_latent - anchor_latent
+        previous_residual = self.step_ddpm_mean(
+            noisy_latent=residual,
+            predicted_noise=predicted_noise,
+            timesteps=timesteps,
+        )
+        return anchor_latent + previous_residual

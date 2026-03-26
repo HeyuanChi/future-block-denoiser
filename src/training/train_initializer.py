@@ -10,86 +10,61 @@ from typing import Any
 
 import torch
 import torch.nn.functional as F
-from tqdm import tqdm
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.data.dataset import DataConfig, build_dataloaders
-from src.models.future_autoencoder import FutureAutoencoder, FutureAutoencoderConfig
+from src.models.future_autoencoder import FutureAutoencoder
 from src.models.future_latent_initializer import FutureLatentInitializer
 from src.models.future_latent_initializer import FutureLatentInitializerConfig
-from src.models.latent_denoiser import LatentDenoiser, LatentDenoiserConfig
 from src.models.prefix_encoder import PrefixEncoder, PrefixEncoderConfig
 from src.training.train_ae import load_config, move_batch_to_device, resolve_device
-from src.utils.noise_schedule import DiffusionNoiseSchedule
+from src.training.train_denoiser import load_autoencoder
 
 
 @dataclass
-class DenoiserTrainConfig:
+class InitializerTrainConfig:
     ae_checkpoint_path: str = "outputs/checkpoints/ae_best.pt"
-    initializer_checkpoint_path: str | None = None
     resume_from_checkpoint: str | None = None
     learning_rate: float = 1e-4
     weight_decay: float = 0.0
-    num_epochs: int = 5
+    num_epochs: int = 20
     device: str = "auto"
     log_every: int = 100
     checkpoint_dir: str = "outputs/checkpoints"
     log_dir: str = "outputs/logs"
     save_every_epoch: bool = True
-    use_coarse_initializer: bool = False
-    freeze_initializer: bool = True
 
     @classmethod
-    def from_dict(cls, config: dict[str, Any]) -> "DenoiserTrainConfig":
+    def from_dict(cls, config: dict[str, Any]) -> "InitializerTrainConfig":
         train_config = config.get("training", config)
         valid_keys = {field.name for field in fields(cls)}
         filtered_config = {key: value for key, value in train_config.items() if key in valid_keys}
         return cls(**filtered_config)
 
 
-def load_autoencoder(
-    config: dict[str, Any],
-    checkpoint_path: str,
-    device: torch.device,
-) -> FutureAutoencoder:
-    ae_config = FutureAutoencoderConfig.from_dict(config)
-    autoencoder = FutureAutoencoder(ae_config)
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    autoencoder.load_state_dict(checkpoint["model_state_dict"])
-    autoencoder.freeze_bert_backbone()
-    for parameter in autoencoder.parameters():
-        parameter.requires_grad = False
-    autoencoder.eval()
-    autoencoder.to(device)
-    return autoencoder
-
-
 def run_epoch(
     autoencoder: FutureAutoencoder,
     prefix_encoder: PrefixEncoder,
-    initializer: FutureLatentInitializer | None,
-    denoiser: LatentDenoiser,
+    initializer: FutureLatentInitializer,
     dataloader: torch.utils.data.DataLoader,
-    noise_schedule: DiffusionNoiseSchedule,
     device: torch.device,
     optimizer: torch.optim.Optimizer | None,
     log_every: int,
-    use_coarse_initializer: bool,
 ) -> float:
     is_train = optimizer is not None
     prefix_encoder.train(is_train)
-    if initializer is not None:
-        initializer.train(is_train and any(parameter.requires_grad for parameter in initializer.parameters()))
-    denoiser.train(is_train)
+    initializer.train(is_train)
 
     total_loss = 0.0
     total_batches = 0
-    progress_bar = tqdm(dataloader, desc="train" if is_train else "val")
 
-    for step, batch in enumerate(progress_bar, start=1):
+    from tqdm import tqdm
+
+    iterator = tqdm(dataloader, desc="train" if is_train else "val")
+    for step, batch in enumerate(iterator, start=1):
         batch = move_batch_to_device(batch, device)
 
         with torch.no_grad():
@@ -105,36 +80,15 @@ def run_epoch(
             prefix_ids=batch["prefix_ids"],
             prefix_mask=batch["prefix_mask"],
         )
-
-        if use_coarse_initializer:
-            if initializer is None:
-                raise ValueError("use_coarse_initializer=True requires an initializer module.")
-            coarse_latent = initializer(
-                prefix_states=prefix_states,
-                prefix_mask=batch["prefix_mask"],
-                future_mask=batch["future_mask"],
-            )
-            timesteps = noise_schedule.sample_timesteps(batch["future_ids"].size(0))
-            noisy_latent, target_noise = noise_schedule.add_noise_around_anchor(
-                clean_latent=clean_latent,
-                anchor_latent=coarse_latent,
-                timesteps=timesteps,
-            )
-        else:
-            timesteps = noise_schedule.sample_timesteps(batch["future_ids"].size(0))
-            noisy_latent, target_noise = noise_schedule.add_noise(clean_latent, timesteps)
-
-        predicted_noise = denoiser(
-            noisy_latent=noisy_latent,
+        coarse_latent = initializer(
             prefix_states=prefix_states,
-            timesteps=timesteps,
             prefix_mask=batch["prefix_mask"],
             future_mask=batch["future_mask"],
         )
 
         loss_mask = batch["future_mask"].unsqueeze(-1).float()
-        loss = F.mse_loss(predicted_noise * loss_mask, target_noise * loss_mask, reduction="sum")
-        normalizer = (loss_mask.sum() * predicted_noise.size(-1)).clamp_min(1.0)
+        loss = F.mse_loss(coarse_latent * loss_mask, clean_latent * loss_mask, reduction="sum")
+        normalizer = (loss_mask.sum() * coarse_latent.size(-1)).clamp_min(1.0)
         loss = loss / normalizer
 
         if is_train:
@@ -143,17 +97,15 @@ def run_epoch(
 
         total_loss += loss.item()
         total_batches += 1
-
         if step % log_every == 0 or step == len(dataloader):
-            progress_bar.set_postfix(loss=f"{loss.item():.4f}")
+            iterator.set_postfix(loss=f"{loss.item():.4f}")
 
     return total_loss / max(total_batches, 1)
 
 
 def save_checkpoint(
     prefix_encoder: PrefixEncoder,
-    initializer: FutureLatentInitializer | None,
-    denoiser: LatentDenoiser,
+    initializer: FutureLatentInitializer,
     optimizer: torch.optim.Optimizer,
     epoch: int,
     train_loss: float,
@@ -161,18 +113,15 @@ def save_checkpoint(
     checkpoint_path: Path,
 ) -> None:
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-    checkpoint = {
-        "epoch": epoch,
-        "prefix_encoder_state_dict": prefix_encoder.state_dict(),
-        "denoiser_state_dict": denoiser.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(),
-        "train_loss": train_loss,
-        "val_loss": val_loss,
-    }
-    if initializer is not None:
-        checkpoint["initializer_state_dict"] = initializer.state_dict()
     torch.save(
-        checkpoint,
+        {
+            "epoch": epoch,
+            "prefix_encoder_state_dict": prefix_encoder.state_dict(),
+            "initializer_state_dict": initializer.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "train_loss": train_loss,
+            "val_loss": val_loss,
+        },
         checkpoint_path,
     )
 
@@ -185,29 +134,26 @@ def append_epoch_log(
     device: torch.device,
 ) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_record = {
+    record = {
         "epoch": epoch,
         "train_loss": train_loss,
         "val_loss": val_loss,
         "device": str(device),
     }
     with open(log_path, "a", encoding="utf-8") as file:
-        file.write(json.dumps(log_record) + "\n")
+        file.write(json.dumps(record) + "\n")
 
 
-def load_denoiser_checkpoint(
+def load_initializer_checkpoint(
     checkpoint_path: str,
     prefix_encoder: PrefixEncoder,
-    initializer: FutureLatentInitializer | None,
-    denoiser: LatentDenoiser,
+    initializer: FutureLatentInitializer,
     optimizer: torch.optim.Optimizer | None,
     device: torch.device,
 ) -> tuple[int, float, bool]:
     checkpoint = torch.load(checkpoint_path, map_location=device)
     prefix_encoder.load_state_dict(checkpoint["prefix_encoder_state_dict"])
-    if initializer is not None and "initializer_state_dict" in checkpoint:
-        initializer.load_state_dict(checkpoint["initializer_state_dict"])
-    denoiser.load_state_dict(checkpoint["denoiser_state_dict"])
+    initializer.load_state_dict(checkpoint["initializer_state_dict"])
 
     optimizer_loaded = False
     if optimizer is not None and "optimizer_state_dict" in checkpoint:
@@ -222,17 +168,6 @@ def load_denoiser_checkpoint(
     return start_epoch, best_val_loss, optimizer_loaded
 
 
-def load_initializer_checkpoint(
-    checkpoint_path: str,
-    prefix_encoder: PrefixEncoder,
-    initializer: FutureLatentInitializer,
-    device: torch.device,
-) -> None:
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    prefix_encoder.load_state_dict(checkpoint["prefix_encoder_state_dict"])
-    initializer.load_state_dict(checkpoint["initializer_state_dict"])
-
-
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="configs/denoiser.yaml")
@@ -242,8 +177,7 @@ def main() -> None:
     data_config = DataConfig.from_dict(config)
     prefix_config = PrefixEncoderConfig.from_dict(config)
     initializer_config = FutureLatentInitializerConfig.from_dict(config)
-    denoiser_config = LatentDenoiserConfig.from_dict(config)
-    train_config = DenoiserTrainConfig.from_dict(config)
+    train_config = InitializerTrainConfig.from_dict(config)
 
     device = resolve_device(train_config.device)
     print(f"Using device: {device}")
@@ -254,38 +188,14 @@ def main() -> None:
         checkpoint_path=train_config.ae_checkpoint_path,
         device=device,
     )
-    prefix_encoder = PrefixEncoder(prefix_config)
+    prefix_encoder = PrefixEncoder(prefix_config).to(device)
     prefix_encoder.freeze_bert_backbone()
-    prefix_encoder.to(device)
 
-    initializer = None
-    if train_config.use_coarse_initializer:
-        initializer = FutureLatentInitializer(initializer_config).to(device)
-        if train_config.initializer_checkpoint_path is not None:
-            load_initializer_checkpoint(
-                checkpoint_path=train_config.initializer_checkpoint_path,
-                prefix_encoder=prefix_encoder,
-                initializer=initializer,
-                device=device,
-            )
-            print(f"Loaded coarse initializer checkpoint: {train_config.initializer_checkpoint_path}")
-        if train_config.freeze_initializer:
-            for parameter in initializer.parameters():
-                parameter.requires_grad = False
-
-    denoiser = LatentDenoiser(denoiser_config).to(device)
-    noise_schedule = DiffusionNoiseSchedule(
-        num_steps=denoiser_config.num_diffusion_steps,
-        device=device,
-    )
+    initializer = FutureLatentInitializer(initializer_config).to(device)
 
     trainable_parameters = [
         parameter
-        for parameter in (
-            list(prefix_encoder.parameters())
-            + ([] if initializer is None else list(initializer.parameters()))
-            + list(denoiser.parameters())
-        )
+        for parameter in list(prefix_encoder.parameters()) + list(initializer.parameters())
         if parameter.requires_grad
     ]
     optimizer = torch.optim.AdamW(
@@ -297,15 +207,13 @@ def main() -> None:
     start_epoch = 1
     best_val_loss = float("inf")
     checkpoint_dir = Path(train_config.checkpoint_dir)
-    log_path = Path(train_config.log_dir) / "denoiser_train.jsonl"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path = Path(train_config.log_dir) / "initializer_train.jsonl"
 
     if train_config.resume_from_checkpoint is not None:
-        start_epoch, best_val_loss, optimizer_loaded = load_denoiser_checkpoint(
+        start_epoch, best_val_loss, optimizer_loaded = load_initializer_checkpoint(
             checkpoint_path=train_config.resume_from_checkpoint,
             prefix_encoder=prefix_encoder,
             initializer=initializer,
-            denoiser=denoiser,
             optimizer=optimizer,
             device=device,
         )
@@ -320,13 +228,10 @@ def main() -> None:
             autoencoder=autoencoder,
             prefix_encoder=prefix_encoder,
             initializer=initializer,
-            denoiser=denoiser,
             dataloader=train_loader,
-            noise_schedule=noise_schedule,
             device=device,
             optimizer=optimizer,
             log_every=train_config.log_every,
-            use_coarse_initializer=train_config.use_coarse_initializer,
         )
 
         with torch.no_grad():
@@ -334,35 +239,25 @@ def main() -> None:
                 autoencoder=autoencoder,
                 prefix_encoder=prefix_encoder,
                 initializer=initializer,
-                denoiser=denoiser,
                 dataloader=val_loader,
-                noise_schedule=noise_schedule,
                 device=device,
                 optimizer=None,
                 log_every=train_config.log_every,
-                use_coarse_initializer=train_config.use_coarse_initializer,
             )
 
         print(f"train_loss: {train_loss:.4f}")
         print(f"val_loss:   {val_loss:.4f}")
-        append_epoch_log(
-            log_path=log_path,
-            epoch=epoch,
-            train_loss=train_loss,
-            val_loss=val_loss,
-            device=device,
-        )
+        append_epoch_log(log_path=log_path, epoch=epoch, train_loss=train_loss, val_loss=val_loss, device=device)
 
         if train_config.save_every_epoch:
             save_checkpoint(
                 prefix_encoder=prefix_encoder,
                 initializer=initializer,
-                denoiser=denoiser,
                 optimizer=optimizer,
                 epoch=epoch,
                 train_loss=train_loss,
                 val_loss=val_loss,
-                checkpoint_path=checkpoint_dir / f"denoiser_epoch_{epoch}.pt",
+                checkpoint_path=checkpoint_dir / f"initializer_epoch_{epoch}.pt",
             )
 
         if val_loss < best_val_loss:
@@ -370,12 +265,11 @@ def main() -> None:
             save_checkpoint(
                 prefix_encoder=prefix_encoder,
                 initializer=initializer,
-                denoiser=denoiser,
                 optimizer=optimizer,
                 epoch=epoch,
                 train_loss=train_loss,
                 val_loss=val_loss,
-                checkpoint_path=checkpoint_dir / "denoiser_best.pt",
+                checkpoint_path=checkpoint_dir / "initializer_best.pt",
             )
 
 
