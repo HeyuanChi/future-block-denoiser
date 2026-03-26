@@ -1,0 +1,43 @@
+data:
+  dataset_name: Salesforce/wikitext
+  dataset_config: wikitext-2-raw-v1
+  tokenizer_name: bert-base-uncased
+  prefix_len: 64
+  future_len: 16
+  stride: 16
+  batch_size: 16
+  num_workers: 0
+  max_train_samples: null
+  max_val_samples: null
+
+model:
+  bert_name: bert-base-uncased
+  latent_dim: 256
+  prefix_len: 64
+  future_len: 16
+  num_diffusion_steps: 25
+  denoiser_layers: 4
+  denoiser_heads: 8
+  denoiser_ffn_dim: 1024
+  denoiser_dropout: 0.1
+  initializer_layers: 2
+  initializer_heads: 8
+  initializer_ffn_dim: 1024
+  initializer_dropout: 0.1
+
+training:
+  ae_checkpoint_path: outputs/checkpoints/ae_best.pt
+  initializer_checkpoint_path: outputs/checkpoints/initializer_best.pt
+  denoiser_checkpoint_path: outputs/checkpoints/denoiser_best.pt
+  resume_from_checkpoint: null
+  learning_rate: 0.0001
+  weight_decay: 0.0
+  num_epochs: 50
+  device: auto
+  log_every: 100
+  checkpoint_dir: outputs/checkpoints
+  log_dir: outputs/logs
+  save_every_epoch: true
+  use_coarse_initializer: true
+  freeze_initializer: true
+  coarse_refinement_mode: residual

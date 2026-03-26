@@ -131,6 +131,25 @@ def iterative_refine_from_coarse_latent(
     return latent
 
 
+def direct_residual_refine_from_coarse_latent(
+    denoiser: LatentDenoiser,
+    coarse_latent: torch.Tensor,
+    prefix_states: torch.Tensor,
+    prefix_mask: torch.Tensor,
+    future_mask: torch.Tensor,
+) -> torch.Tensor:
+    batch_size = prefix_states.size(0)
+    timestep_tensor = torch.zeros((batch_size,), device=prefix_states.device, dtype=torch.long)
+    predicted_delta = denoiser(
+        noisy_latent=coarse_latent,
+        prefix_states=prefix_states,
+        timesteps=timestep_tensor,
+        prefix_mask=prefix_mask,
+        future_mask=future_mask,
+    )
+    return coarse_latent + predicted_delta
+
+
 def decode_ids(tokenizer, token_ids: torch.Tensor) -> str:
     return tokenizer.decode(token_ids.tolist(), skip_special_tokens=True)
 
@@ -146,6 +165,7 @@ def main() -> None:
     config["training"].setdefault("ae_checkpoint_path", "outputs/checkpoints/ae_best.pt")
     config["training"].setdefault("denoiser_checkpoint_path", "outputs/checkpoints/denoiser_best.pt")
     config["training"].setdefault("initializer_checkpoint_path", "outputs/checkpoints/initializer_best.pt")
+    config["training"].setdefault("coarse_refinement_mode", "noise")
 
     data_config = DataConfig.from_dict(config)
     data_config.batch_size = 1
@@ -199,15 +219,24 @@ def main() -> None:
                 future_mask=batch["future_mask"],
             )
             coarse_prediction_ids = coarse_logits.argmax(dim=-1)
-            denoised_latent = iterative_refine_from_coarse_latent(
-                denoiser=denoiser,
-                noise_schedule=noise_schedule,
-                coarse_latent=coarse_latent,
-                prefix_states=prefix_states,
-                prefix_mask=batch["prefix_mask"],
-                future_mask=batch["future_mask"],
-                num_steps=num_steps,
-            )
+            if config["training"].get("coarse_refinement_mode", "noise") == "residual":
+                denoised_latent = direct_residual_refine_from_coarse_latent(
+                    denoiser=denoiser,
+                    coarse_latent=coarse_latent,
+                    prefix_states=prefix_states,
+                    prefix_mask=batch["prefix_mask"],
+                    future_mask=batch["future_mask"],
+                )
+            else:
+                denoised_latent = iterative_refine_from_coarse_latent(
+                    denoiser=denoiser,
+                    noise_schedule=noise_schedule,
+                    coarse_latent=coarse_latent,
+                    prefix_states=prefix_states,
+                    prefix_mask=batch["prefix_mask"],
+                    future_mask=batch["future_mask"],
+                    num_steps=num_steps,
+                )
         else:
             denoised_latent = iterative_refine_latent(
                 denoiser=denoiser,
@@ -223,42 +252,45 @@ def main() -> None:
         )
         denoised_prediction_ids = denoised_logits.argmax(dim=-1)
 
-        oracle_timestep = torch.full(
-            (batch["future_ids"].size(0),),
-            denoiser_config.num_diffusion_steps - 1,
-            device=device,
-            dtype=torch.long,
-        )
-        if use_coarse_initializer:
-            if coarse_latent is None:
-                raise ValueError("coarse_latent must be available in coarse initializer mode.")
-            oracle_noisy_latent, _ = noise_schedule.add_noise_around_anchor(
-                clean_latent=target_latent,
-                anchor_latent=coarse_latent,
-                timesteps=oracle_timestep,
-            )
+        if use_coarse_initializer and config["training"].get("coarse_refinement_mode", "noise") == "residual":
+            oracle_latent = target_latent
         else:
-            oracle_noisy_latent, _ = noise_schedule.add_noise(target_latent, oracle_timestep)
-        oracle_predicted_noise = denoiser(
-            noisy_latent=oracle_noisy_latent,
-            prefix_states=prefix_states,
-            timesteps=oracle_timestep,
-            prefix_mask=batch["prefix_mask"],
-            future_mask=batch["future_mask"],
-        )
-        if use_coarse_initializer:
-            oracle_latent = noise_schedule.predict_clean_from_noise_around_anchor(
-                noisy_latent=oracle_noisy_latent,
-                anchor_latent=coarse_latent,
-                predicted_noise=oracle_predicted_noise,
-                timesteps=oracle_timestep,
+            oracle_timestep = torch.full(
+                (batch["future_ids"].size(0),),
+                denoiser_config.num_diffusion_steps - 1,
+                device=device,
+                dtype=torch.long,
             )
-        else:
-            oracle_latent = noise_schedule.predict_clean_from_noise(
+            if use_coarse_initializer:
+                if coarse_latent is None:
+                    raise ValueError("coarse_latent must be available in coarse initializer mode.")
+                oracle_noisy_latent, _ = noise_schedule.add_noise_around_anchor(
+                    clean_latent=target_latent,
+                    anchor_latent=coarse_latent,
+                    timesteps=oracle_timestep,
+                )
+            else:
+                oracle_noisy_latent, _ = noise_schedule.add_noise(target_latent, oracle_timestep)
+            oracle_predicted_noise = denoiser(
                 noisy_latent=oracle_noisy_latent,
-                predicted_noise=oracle_predicted_noise,
+                prefix_states=prefix_states,
                 timesteps=oracle_timestep,
+                prefix_mask=batch["prefix_mask"],
+                future_mask=batch["future_mask"],
             )
+            if use_coarse_initializer:
+                oracle_latent = noise_schedule.predict_clean_from_noise_around_anchor(
+                    noisy_latent=oracle_noisy_latent,
+                    anchor_latent=coarse_latent,
+                    predicted_noise=oracle_predicted_noise,
+                    timesteps=oracle_timestep,
+                )
+            else:
+                oracle_latent = noise_schedule.predict_clean_from_noise(
+                    noisy_latent=oracle_noisy_latent,
+                    predicted_noise=oracle_predicted_noise,
+                    timesteps=oracle_timestep,
+                )
         oracle_logits = autoencoder.decode_latent(
             latent=oracle_latent,
             future_mask=batch["future_mask"],
@@ -287,7 +319,10 @@ def main() -> None:
         print(coarse_text)
     print("\nDenoised Prediction:")
     print(denoised_text)
-    print("\nOracle Denoise From True Latent + Noise:")
+    oracle_label = "Oracle Denoise From True Latent + Noise"
+    if use_coarse_initializer and config["training"].get("coarse_refinement_mode", "noise") == "residual":
+        oracle_label = "Oracle Target Latent Decode"
+    print(f"\n{oracle_label}:")
     print(oracle_text)
     if coarse_latent_mse is not None:
         print(f"\nCoarse latent MSE to AE target: {coarse_latent_mse:.4f}")

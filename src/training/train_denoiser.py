@@ -41,6 +41,7 @@ class DenoiserTrainConfig:
     save_every_epoch: bool = True
     use_coarse_initializer: bool = False
     freeze_initializer: bool = True
+    coarse_refinement_mode: str = "noise"
 
     @classmethod
     def from_dict(cls, config: dict[str, Any]) -> "DenoiserTrainConfig":
@@ -78,6 +79,7 @@ def run_epoch(
     optimizer: torch.optim.Optimizer | None,
     log_every: int,
     use_coarse_initializer: bool,
+    coarse_refinement_mode: str,
 ) -> float:
     is_train = optimizer is not None
     prefix_encoder.train(is_train)
@@ -114,12 +116,17 @@ def run_epoch(
                 prefix_mask=batch["prefix_mask"],
                 future_mask=batch["future_mask"],
             )
-            timesteps = noise_schedule.sample_timesteps(batch["future_ids"].size(0))
-            noisy_latent, target_noise = noise_schedule.add_noise_around_anchor(
-                clean_latent=clean_latent,
-                anchor_latent=coarse_latent,
-                timesteps=timesteps,
-            )
+            if coarse_refinement_mode == "residual":
+                timesteps = torch.zeros(batch["future_ids"].size(0), device=device, dtype=torch.long)
+                noisy_latent = coarse_latent
+                target_noise = clean_latent - coarse_latent
+            else:
+                timesteps = noise_schedule.sample_timesteps(batch["future_ids"].size(0))
+                noisy_latent, target_noise = noise_schedule.add_noise_around_anchor(
+                    clean_latent=clean_latent,
+                    anchor_latent=coarse_latent,
+                    timesteps=timesteps,
+                )
         else:
             timesteps = noise_schedule.sample_timesteps(batch["future_ids"].size(0))
             noisy_latent, target_noise = noise_schedule.add_noise(clean_latent, timesteps)
@@ -327,6 +334,7 @@ def main() -> None:
             optimizer=optimizer,
             log_every=train_config.log_every,
             use_coarse_initializer=train_config.use_coarse_initializer,
+            coarse_refinement_mode=train_config.coarse_refinement_mode,
         )
 
         with torch.no_grad():
@@ -341,6 +349,7 @@ def main() -> None:
                 optimizer=None,
                 log_every=train_config.log_every,
                 use_coarse_initializer=train_config.use_coarse_initializer,
+                coarse_refinement_mode=train_config.coarse_refinement_mode,
             )
 
         print(f"train_loss: {train_loss:.4f}")
