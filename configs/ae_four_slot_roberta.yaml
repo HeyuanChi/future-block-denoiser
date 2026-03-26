@@ -1,0 +1,31 @@
+data:
+  dataset_name: Salesforce/wikitext
+  dataset_config: wikitext-2-raw-v1
+  tokenizer_name: roberta-base
+  prefix_len: 64
+  future_len: 16
+  stride: 16
+  batch_size: 512
+  num_workers: 8
+  max_train_samples: null
+  max_val_samples: null
+
+model:
+  bert_name: roberta-base
+  future_len: 16
+  coarse_slots: 4
+  latent_dim: 256
+  decoder_layers: 2
+  decoder_heads: 8
+  decoder_ffn_dim: 1024
+  decoder_dropout: 0.1
+
+training:
+  learning_rate: 0.001
+  weight_decay: 0.0
+  num_epochs: 100
+  device: auto
+  log_every: 100
+  checkpoint_dir: outputs/checkpoints/ae_four_slot_roberta
+  log_dir: outputs/logs/ae_four_slot_roberta
+  save_every_epoch: true

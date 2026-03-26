@@ -13,6 +13,7 @@ from transformers import AutoModel
 class FutureAutoencoderConfig:
     bert_name: str = "bert-base-uncased"
     future_len: int = 16
+    coarse_slots: int = 16
     latent_dim: int = 256
     decoder_layers: int = 2
     decoder_heads: int = 8
@@ -35,7 +36,7 @@ class FutureAutoencoder(nn.Module):
         future_ids: [B, 16]
         future_mask: [B, 16]
     Output:
-        latent: [B, 16, 256]
+        latent: [B, coarse_slots, 256]
         logits: [B, 16, vocab_size]
     """
 
@@ -52,8 +53,24 @@ class FutureAutoencoder(nn.Module):
         self.future_encoder.encoder.layer = nn.ModuleList(self.future_encoder.encoder.layer[:2])
         hidden_size = self.future_encoder.config.hidden_size
         vocab_size = self.future_encoder.config.vocab_size
+        self.coarse_slots = config.coarse_slots
 
         self.latent_projection = nn.Linear(hidden_size, config.latent_dim)
+        self.coarse_queries = nn.Parameter(torch.randn(config.coarse_slots, config.latent_dim) * 0.02)
+        self.coarse_cross_attention = nn.MultiheadAttention(
+            embed_dim=config.latent_dim,
+            num_heads=config.decoder_heads,
+            batch_first=True,
+        )
+        self.coarse_layer_norm = nn.LayerNorm(config.latent_dim)
+
+        self.expand_queries = nn.Parameter(torch.randn(config.future_len, config.latent_dim) * 0.02)
+        self.expand_cross_attention = nn.MultiheadAttention(
+            embed_dim=config.latent_dim,
+            num_heads=config.decoder_heads,
+            batch_first=True,
+        )
+        self.expand_layer_norm = nn.LayerNorm(config.latent_dim)
         self.latent_to_hidden = nn.Linear(config.latent_dim, hidden_size)
         self.decoder_position_embeddings = nn.Embedding(config.future_len, hidden_size)
         self.decoder_layer_norm = nn.LayerNorm(hidden_size)
@@ -87,14 +104,49 @@ class FutureAutoencoder(nn.Module):
             future_ids: [B, S]
             future_mask: [B, S]
         Returns:
-            latent: [B, S, latent_dim]
+            latent: [B, coarse_slots, latent_dim]
         """
         encoder_outputs = self.future_encoder(
             input_ids=future_ids,
             attention_mask=future_mask,
         )
-        latent = self.latent_projection(encoder_outputs.last_hidden_state)
-        return latent
+        token_latent = self.latent_projection(encoder_outputs.last_hidden_state)
+        return self.compress_latent(token_latent=token_latent, future_mask=future_mask)
+
+    def compress_latent(
+        self,
+        token_latent: torch.Tensor,
+        future_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.coarse_slots == self.config.future_len:
+            return token_latent
+        batch_size = token_latent.size(0)
+        coarse_queries = self.coarse_queries.unsqueeze(0).expand(batch_size, -1, -1)
+        key_padding_mask = future_mask == 0
+        coarse_latent, _ = self.coarse_cross_attention(
+            query=coarse_queries,
+            key=token_latent,
+            value=token_latent,
+            key_padding_mask=key_padding_mask,
+            need_weights=False,
+        )
+        return self.coarse_layer_norm(coarse_queries + coarse_latent)
+
+    def expand_latent(
+        self,
+        coarse_latent: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.coarse_slots == self.config.future_len:
+            return coarse_latent
+        batch_size = coarse_latent.size(0)
+        expand_queries = self.expand_queries.unsqueeze(0).expand(batch_size, -1, -1)
+        expanded_latent, _ = self.expand_cross_attention(
+            query=expand_queries,
+            key=coarse_latent,
+            value=coarse_latent,
+            need_weights=False,
+        )
+        return self.expand_layer_norm(expand_queries + expanded_latent)
 
     def decode_latent(
         self,
@@ -108,6 +160,9 @@ class FutureAutoencoder(nn.Module):
         Returns:
             logits: [B, S, vocab_size]
         """
+        if latent.size(1) != self.config.future_len:
+            latent = self.expand_latent(latent)
+
         batch_size, seq_len, _ = latent.shape
         hidden_states = self.latent_to_hidden(latent)
 
