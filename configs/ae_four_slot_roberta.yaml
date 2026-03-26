@@ -21,11 +21,13 @@ model:
   decoder_dropout: 0.1
 
 training:
-  learning_rate: 0.001
+  learning_rate: 0.0003
   weight_decay: 0.0
   num_epochs: 100
   device: auto
   log_every: 100
-  checkpoint_dir: outputs/checkpoints/ae_four_slot_roberta
-  log_dir: outputs/logs/ae_four_slot_roberta
+  checkpoint_dir: outputs/checkpoints/ae_four_slot_roberta_stable
+  log_dir: outputs/logs/ae_four_slot_roberta_stable
   save_every_epoch: false
+  warm_start_from_checkpoint: outputs/checkpoints/ae_four_slot_roberta/ae_best.pt
+  grad_clip_norm: 1.0

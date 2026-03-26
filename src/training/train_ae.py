@@ -30,6 +30,8 @@ class TrainConfig:
     checkpoint_dir: str = "outputs/checkpoints"
     log_dir: str = "outputs/logs"
     save_every_epoch: bool = True
+    warm_start_from_checkpoint: str | None = None
+    grad_clip_norm: float | None = None
 
     @classmethod
     def from_dict(cls, config: dict[str, Any]) -> "TrainConfig":
@@ -72,6 +74,7 @@ def run_epoch(
     device: torch.device,
     optimizer: torch.optim.Optimizer | None,
     log_every: int,
+    grad_clip_norm: float | None,
 ) -> float:
     is_train = optimizer is not None
     model.train(is_train)
@@ -97,6 +100,8 @@ def run_epoch(
 
         if is_train:
             loss.backward()
+            if grad_clip_norm is not None:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
             optimizer.step()
 
         total_loss += loss.item()
@@ -127,6 +132,16 @@ def save_checkpoint(
         },
         checkpoint_path,
     )
+
+
+def load_warm_start_checkpoint(
+    checkpoint_path: str,
+    model: FutureAutoencoder,
+    device: torch.device,
+) -> float:
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    return float(checkpoint.get("val_loss", float("inf")))
 
 
 def append_epoch_log(
@@ -177,6 +192,16 @@ def main() -> None:
     log_path = Path(train_config.log_dir) / "ae_train.jsonl"
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
+    if train_config.warm_start_from_checkpoint is not None:
+        best_val_loss = load_warm_start_checkpoint(
+            checkpoint_path=train_config.warm_start_from_checkpoint,
+            model=model,
+            device=device,
+        )
+        print(f"Warm-started model weights from: {train_config.warm_start_from_checkpoint}")
+        if best_val_loss != float("inf"):
+            print(f"Initial best_val_loss threshold: {best_val_loss:.4f}")
+
     for epoch in range(1, train_config.num_epochs + 1):
         print(f"Epoch {epoch}/{train_config.num_epochs}")
         train_loss = run_epoch(
@@ -185,6 +210,7 @@ def main() -> None:
             device=device,
             optimizer=optimizer,
             log_every=train_config.log_every,
+            grad_clip_norm=train_config.grad_clip_norm,
         )
 
         with torch.no_grad():
@@ -194,6 +220,7 @@ def main() -> None:
                 device=device,
                 optimizer=None,
                 log_every=train_config.log_every,
+                grad_clip_norm=None,
             )
 
         print(f"train_loss: {train_loss:.4f}")
