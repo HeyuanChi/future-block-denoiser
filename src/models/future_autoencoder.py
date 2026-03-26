@@ -6,7 +6,7 @@ from typing import Any
 
 import torch
 from torch import nn
-from transformers import BertModel
+from transformers import AutoModel
 
 
 @dataclass
@@ -43,7 +43,11 @@ class FutureAutoencoder(nn.Module):
         super().__init__()
         self.config = config
 
-        self.future_encoder = BertModel.from_pretrained(config.bert_name)
+        self.future_encoder = AutoModel.from_pretrained(config.bert_name)
+        if not hasattr(self.future_encoder, "encoder") or not hasattr(self.future_encoder.encoder, "layer"):
+            raise ValueError(
+                f"Backbone '{config.bert_name}' does not expose encoder.layer, so it is not supported by FutureAutoencoder."
+            )
         self.future_encoder.encoder.layer = nn.ModuleList(self.future_encoder.encoder.layer[:2])
         hidden_size = self.future_encoder.config.hidden_size
         vocab_size = self.future_encoder.config.vocab_size
