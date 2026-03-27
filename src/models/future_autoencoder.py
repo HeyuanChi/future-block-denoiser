@@ -15,6 +15,8 @@ class FutureAutoencoderConfig:
     future_len: int = 16
     coarse_slots: int = 16
     latent_dim: int = 256
+    latent_structure: str = "attention"
+    latent_conv_kernel_size: int = 3
     decoder_layers: int = 2
     decoder_heads: int = 8
     decoder_ffn_dim: int = 1024
@@ -54,22 +56,56 @@ class FutureAutoencoder(nn.Module):
         hidden_size = self.future_encoder.config.hidden_size
         vocab_size = self.future_encoder.config.vocab_size
         self.coarse_slots = config.coarse_slots
+        self.latent_structure = config.latent_structure
+        self.downsample_factor = max(config.future_len // max(config.coarse_slots, 1), 1)
 
         self.latent_projection = nn.Linear(hidden_size, config.latent_dim)
-        self.coarse_queries = nn.Parameter(torch.randn(config.coarse_slots, config.latent_dim) * 0.02)
-        self.coarse_cross_attention = nn.MultiheadAttention(
-            embed_dim=config.latent_dim,
-            num_heads=config.decoder_heads,
-            batch_first=True,
-        )
+        if self.latent_structure == "attention":
+            self.coarse_queries = nn.Parameter(torch.randn(config.coarse_slots, config.latent_dim) * 0.02)
+            self.coarse_cross_attention = nn.MultiheadAttention(
+                embed_dim=config.latent_dim,
+                num_heads=config.decoder_heads,
+                batch_first=True,
+            )
+            self.expand_queries = nn.Parameter(torch.randn(config.future_len, config.latent_dim) * 0.02)
+            self.expand_cross_attention = nn.MultiheadAttention(
+                embed_dim=config.latent_dim,
+                num_heads=config.decoder_heads,
+                batch_first=True,
+            )
+        elif self.latent_structure == "conv_pool":
+            if config.future_len % config.coarse_slots != 0:
+                raise ValueError(
+                    "conv_pool latent structure requires future_len to be divisible by coarse_slots."
+                )
+            padding = config.latent_conv_kernel_size // 2
+            self.downsample_conv = nn.Conv1d(
+                in_channels=config.latent_dim,
+                out_channels=config.latent_dim,
+                kernel_size=config.latent_conv_kernel_size,
+                padding=padding,
+            )
+            self.upsample_deconv = nn.ConvTranspose1d(
+                in_channels=config.latent_dim,
+                out_channels=config.latent_dim,
+                kernel_size=self.downsample_factor,
+                stride=self.downsample_factor,
+            )
+            self.upsample_refine = nn.Sequential(
+                nn.GELU(),
+                nn.Conv1d(
+                    in_channels=config.latent_dim,
+                    out_channels=config.latent_dim,
+                    kernel_size=config.latent_conv_kernel_size,
+                    padding=padding,
+                ),
+            )
+        else:
+            raise ValueError(
+                f"Unsupported latent_structure={config.latent_structure!r}. "
+                "Expected 'attention' or 'conv_pool'."
+            )
         self.coarse_layer_norm = nn.LayerNorm(config.latent_dim)
-
-        self.expand_queries = nn.Parameter(torch.randn(config.future_len, config.latent_dim) * 0.02)
-        self.expand_cross_attention = nn.MultiheadAttention(
-            embed_dim=config.latent_dim,
-            num_heads=config.decoder_heads,
-            batch_first=True,
-        )
         self.expand_layer_norm = nn.LayerNorm(config.latent_dim)
         self.latent_to_hidden = nn.Linear(config.latent_dim, hidden_size)
         self.decoder_position_embeddings = nn.Embedding(config.future_len, hidden_size)
@@ -120,6 +156,8 @@ class FutureAutoencoder(nn.Module):
     ) -> torch.Tensor:
         if self.coarse_slots == self.config.future_len:
             return token_latent
+        if self.latent_structure == "conv_pool":
+            return self.compress_latent_conv_pool(token_latent=token_latent, future_mask=future_mask)
         batch_size = token_latent.size(0)
         coarse_queries = self.coarse_queries.unsqueeze(0).expand(batch_size, -1, -1)
         key_padding_mask = future_mask == 0
@@ -132,12 +170,32 @@ class FutureAutoencoder(nn.Module):
         )
         return self.coarse_layer_norm(coarse_queries + coarse_latent)
 
+    def compress_latent_conv_pool(
+        self,
+        token_latent: torch.Tensor,
+        future_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        batch_size, _, latent_dim = token_latent.shape
+        block_size = self.downsample_factor
+
+        smoothed_latent = self.downsample_conv(token_latent.transpose(1, 2)).transpose(1, 2)
+        smoothed_latent = smoothed_latent.masked_fill(future_mask.unsqueeze(-1) == 0, 0.0)
+
+        block_latent = smoothed_latent.reshape(batch_size, self.coarse_slots, block_size, latent_dim)
+        block_mask = future_mask.reshape(batch_size, self.coarse_slots, block_size, 1).to(block_latent.dtype)
+        block_sum = (block_latent * block_mask).sum(dim=2)
+        block_count = block_mask.sum(dim=2).clamp_min(1.0)
+        coarse_latent = block_sum / block_count
+        return self.coarse_layer_norm(coarse_latent)
+
     def expand_latent(
         self,
         coarse_latent: torch.Tensor,
     ) -> torch.Tensor:
         if self.coarse_slots == self.config.future_len:
             return coarse_latent
+        if self.latent_structure == "conv_pool":
+            return self.expand_latent_conv_pool(coarse_latent=coarse_latent)
         batch_size = coarse_latent.size(0)
         expand_queries = self.expand_queries.unsqueeze(0).expand(batch_size, -1, -1)
         expanded_latent, _ = self.expand_cross_attention(
@@ -147,6 +205,15 @@ class FutureAutoencoder(nn.Module):
             need_weights=False,
         )
         return self.expand_layer_norm(expand_queries + expanded_latent)
+
+    def expand_latent_conv_pool(
+        self,
+        coarse_latent: torch.Tensor,
+    ) -> torch.Tensor:
+        repeated_latent = coarse_latent.repeat_interleave(self.downsample_factor, dim=1)
+        upsampled_latent = self.upsample_deconv(coarse_latent.transpose(1, 2)).transpose(1, 2)
+        upsampled_latent = self.upsample_refine(upsampled_latent.transpose(1, 2)).transpose(1, 2)
+        return self.expand_layer_norm(repeated_latent + upsampled_latent)
 
     def decode_latent(
         self,
