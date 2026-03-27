@@ -21,6 +21,7 @@ from src.models.future_autoencoder import FutureAutoencoder, FutureAutoencoderCo
 from src.models.future_latent_predictor import FutureLatentPredictor, FutureLatentPredictorConfig
 from src.models.prefix_encoder import PrefixEncoder, PrefixEncoderConfig
 from src.training.train_ae import load_config, move_batch_to_device, resolve_device
+from src.utils.metrics import masked_token_cross_entropy
 
 
 @dataclass
@@ -36,6 +37,7 @@ class PredictorTrainConfig:
     log_dir: str = "outputs/logs/four_slot_predictor"
     save_every_epoch: bool = False
     grad_clip_norm: float | None = 1.0
+    decode_loss_weight: float = 0.2
 
     @classmethod
     def from_dict(cls, config: dict[str, Any]) -> "PredictorTrainConfig":
@@ -71,6 +73,7 @@ def run_epoch(
     optimizer: torch.optim.Optimizer | None,
     log_every: int,
     grad_clip_norm: float | None,
+    decode_loss_weight: float,
 ) -> float:
     is_train = optimizer is not None
     prefix_encoder.train(is_train)
@@ -101,7 +104,17 @@ def run_epoch(
             prefix_mask=batch["prefix_mask"],
         )
 
-        loss = F.mse_loss(predicted_latent, target_latent)
+        latent_loss = F.mse_loss(predicted_latent, target_latent)
+        decoded_logits = autoencoder.decode_latent(
+            latent=predicted_latent,
+            future_mask=batch["future_mask"],
+        )
+        decode_loss = masked_token_cross_entropy(
+            logits=decoded_logits,
+            target_ids=batch["future_ids"],
+            mask=batch["future_mask"],
+        )
+        loss = latent_loss + decode_loss_weight * decode_loss
 
         if is_train:
             loss.backward()
@@ -213,6 +226,7 @@ def main() -> None:
             optimizer=optimizer,
             log_every=train_config.log_every,
             grad_clip_norm=train_config.grad_clip_norm,
+            decode_loss_weight=train_config.decode_loss_weight,
         )
 
         with torch.no_grad():
@@ -225,6 +239,7 @@ def main() -> None:
                 optimizer=None,
                 log_every=train_config.log_every,
                 grad_clip_norm=None,
+                decode_loss_weight=train_config.decode_loss_weight,
             )
 
         print(f"train_loss: {train_loss:.4f}")

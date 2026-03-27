@@ -32,3 +32,4 @@ training:
   log_dir: outputs/logs/four_slot_predictor_roberta
   save_every_epoch: false
   grad_clip_norm: 1.0
+  decode_loss_weight: 0.2
