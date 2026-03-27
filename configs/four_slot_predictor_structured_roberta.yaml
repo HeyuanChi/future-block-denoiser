@@ -16,7 +16,7 @@ model:
   future_len: 16
   coarse_slots: 4
   latent_dim: 256
-  latent_structure: conv_pool
+  latent_structure: conv_compress_attention_expand
   latent_conv_kernel_size: 3
   predictor_layers: 2
   predictor_heads: 8
@@ -24,14 +24,14 @@ model:
   predictor_dropout: 0.1
 
 training:
-  ae_checkpoint_path: outputs/checkpoints/ae_four_slot_structured_roberta/ae_best.pt
+  ae_checkpoint_path: outputs/checkpoints/ae_four_slot_hybrid_roberta/ae_best.pt
   learning_rate: 0.0001
   weight_decay: 0.0
   num_epochs: 100
   device: auto
   log_every: 100
-  checkpoint_dir: outputs/checkpoints/four_slot_predictor_structured_roberta
-  log_dir: outputs/logs/four_slot_predictor_structured_roberta
+  checkpoint_dir: outputs/checkpoints/four_slot_predictor_hybrid_roberta
+  log_dir: outputs/logs/four_slot_predictor_hybrid_roberta
   save_every_epoch: false
   grad_clip_norm: 1.0
   decode_loss_weight: 0.2

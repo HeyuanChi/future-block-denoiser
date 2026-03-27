@@ -58,9 +58,11 @@ class FutureAutoencoder(nn.Module):
         self.coarse_slots = config.coarse_slots
         self.latent_structure = config.latent_structure
         self.downsample_factor = max(config.future_len // max(config.coarse_slots, 1), 1)
+        self.use_conv_compress = self.latent_structure in {"conv_pool", "conv_compress_attention_expand"}
+        self.use_attention_expand = self.latent_structure in {"attention", "conv_compress_attention_expand"}
 
         self.latent_projection = nn.Linear(hidden_size, config.latent_dim)
-        if self.latent_structure == "attention":
+        if self.latent_structure in {"attention", "conv_compress_attention_expand"}:
             self.coarse_queries = nn.Parameter(torch.randn(config.coarse_slots, config.latent_dim) * 0.02)
             self.coarse_cross_attention = nn.MultiheadAttention(
                 embed_dim=config.latent_dim,
@@ -73,10 +75,10 @@ class FutureAutoencoder(nn.Module):
                 num_heads=config.decoder_heads,
                 batch_first=True,
             )
-        elif self.latent_structure == "conv_pool":
+        if self.use_conv_compress:
             if config.future_len % config.coarse_slots != 0:
                 raise ValueError(
-                    "conv_pool latent structure requires future_len to be divisible by coarse_slots."
+                    "Structured latent compression requires future_len to be divisible by coarse_slots."
                 )
             padding = config.latent_conv_kernel_size // 2
             self.downsample_conv = nn.Conv1d(
@@ -85,6 +87,7 @@ class FutureAutoencoder(nn.Module):
                 kernel_size=config.latent_conv_kernel_size,
                 padding=padding,
             )
+        if self.latent_structure == "conv_pool":
             self.upsample_deconv = nn.ConvTranspose1d(
                 in_channels=config.latent_dim,
                 out_channels=config.latent_dim,
@@ -100,10 +103,10 @@ class FutureAutoencoder(nn.Module):
                     padding=padding,
                 ),
             )
-        else:
+        elif self.latent_structure not in {"attention", "conv_compress_attention_expand"}:
             raise ValueError(
                 f"Unsupported latent_structure={config.latent_structure!r}. "
-                "Expected 'attention' or 'conv_pool'."
+                "Expected 'attention', 'conv_pool', or 'conv_compress_attention_expand'."
             )
         self.coarse_layer_norm = nn.LayerNorm(config.latent_dim)
         self.expand_layer_norm = nn.LayerNorm(config.latent_dim)
@@ -156,7 +159,7 @@ class FutureAutoencoder(nn.Module):
     ) -> torch.Tensor:
         if self.coarse_slots == self.config.future_len:
             return token_latent
-        if self.latent_structure == "conv_pool":
+        if self.use_conv_compress:
             return self.compress_latent_conv_pool(token_latent=token_latent, future_mask=future_mask)
         batch_size = token_latent.size(0)
         coarse_queries = self.coarse_queries.unsqueeze(0).expand(batch_size, -1, -1)
@@ -194,7 +197,7 @@ class FutureAutoencoder(nn.Module):
     ) -> torch.Tensor:
         if self.coarse_slots == self.config.future_len:
             return coarse_latent
-        if self.latent_structure == "conv_pool":
+        if not self.use_attention_expand:
             return self.expand_latent_conv_pool(coarse_latent=coarse_latent)
         batch_size = coarse_latent.size(0)
         expand_queries = self.expand_queries.unsqueeze(0).expand(batch_size, -1, -1)
