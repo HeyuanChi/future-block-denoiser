@@ -48,7 +48,7 @@ def load_components(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="configs/four_slot_predictor_roberta.yaml")
+    parser.add_argument("--config", type=str, default="configs/four_slot_autoregressive_predictor_roberta.yaml")
     parser.add_argument("--sample-index", type=int, default=0)
     args = parser.parse_args()
 

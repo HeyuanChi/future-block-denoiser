@@ -102,6 +102,7 @@ def run_epoch(
         predicted_latent = predictor(
             prefix_states=prefix_states,
             prefix_mask=batch["prefix_mask"],
+            target_latent=target_latent if is_train else None,
         )
 
         latent_loss = F.mse_loss(predicted_latent, target_latent)
