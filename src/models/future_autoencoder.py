@@ -15,6 +15,9 @@ class FutureAutoencoderConfig:
     future_len: int = 16
     coarse_slots: int = 16
     latent_dim: int = 256
+    slot_refinement: str = "none"
+    slot_refinement_layers: int = 1
+    slot_refinement_scale: float = 0.25
     decoder_layers: int = 2
     decoder_heads: int = 8
     decoder_ffn_dim: int = 1024
@@ -54,6 +57,7 @@ class FutureAutoencoder(nn.Module):
         hidden_size = self.future_encoder.config.hidden_size
         vocab_size = self.future_encoder.config.vocab_size
         self.coarse_slots = config.coarse_slots
+        self.slot_refinement = config.slot_refinement
 
         self.latent_projection = nn.Linear(hidden_size, config.latent_dim)
         self.coarse_queries = nn.Parameter(torch.randn(config.coarse_slots, config.latent_dim) * 0.02)
@@ -63,6 +67,26 @@ class FutureAutoencoder(nn.Module):
             batch_first=True,
         )
         self.coarse_layer_norm = nn.LayerNorm(config.latent_dim)
+        if self.slot_refinement == "causal_residual":
+            self.slot_position_embeddings = nn.Embedding(config.coarse_slots, config.latent_dim)
+            slot_encoder_layer = nn.TransformerEncoderLayer(
+                d_model=config.latent_dim,
+                nhead=config.decoder_heads,
+                dim_feedforward=config.decoder_ffn_dim,
+                dropout=config.decoder_dropout,
+                activation="gelu",
+                batch_first=True,
+                norm_first=True,
+            )
+            self.slot_refiner = nn.TransformerEncoder(
+                encoder_layer=slot_encoder_layer,
+                num_layers=config.slot_refinement_layers,
+            )
+        elif self.slot_refinement != "none":
+            raise ValueError(
+                f"Unsupported slot_refinement={config.slot_refinement!r}. "
+                "Expected 'none' or 'causal_residual'."
+            )
 
         self.expand_queries = nn.Parameter(torch.randn(config.future_len, config.latent_dim) * 0.02)
         self.expand_cross_attention = nn.MultiheadAttention(
@@ -130,7 +154,28 @@ class FutureAutoencoder(nn.Module):
             key_padding_mask=key_padding_mask,
             need_weights=False,
         )
-        return self.coarse_layer_norm(coarse_queries + coarse_latent)
+        coarse_latent = self.coarse_layer_norm(coarse_queries + coarse_latent)
+        return self.refine_slots(coarse_latent)
+
+    def refine_slots(
+        self,
+        coarse_latent: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.slot_refinement == "none":
+            return coarse_latent
+
+        batch_size = coarse_latent.size(0)
+        slot_position_ids = torch.arange(self.coarse_slots, device=coarse_latent.device).unsqueeze(0).expand(
+            batch_size,
+            self.coarse_slots,
+        )
+        slot_inputs = coarse_latent + self.slot_position_embeddings(slot_position_ids)
+        causal_mask = torch.triu(
+            torch.full((self.coarse_slots, self.coarse_slots), float("-inf"), device=coarse_latent.device),
+            diagonal=1,
+        )
+        refined_slots = self.slot_refiner(slot_inputs, mask=causal_mask)
+        return coarse_latent + self.config.slot_refinement_scale * refined_slots
 
     def expand_latent(
         self,
