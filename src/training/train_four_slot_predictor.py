@@ -38,6 +38,7 @@ class PredictorTrainConfig:
     save_every_epoch: bool = False
     grad_clip_norm: float | None = 1.0
     decode_loss_weight: float = 0.2
+    slot_loss_weights: list[float] | None = None
 
     @classmethod
     def from_dict(cls, config: dict[str, Any]) -> "PredictorTrainConfig":
@@ -74,6 +75,7 @@ def run_epoch(
     log_every: int,
     grad_clip_norm: float | None,
     decode_loss_weight: float,
+    slot_loss_weights: list[float] | None,
 ) -> float:
     is_train = optimizer is not None
     prefix_encoder.train(is_train)
@@ -104,7 +106,11 @@ def run_epoch(
             prefix_mask=batch["prefix_mask"],
         )
 
-        latent_loss = F.mse_loss(predicted_latent, target_latent)
+        latent_loss = compute_latent_loss(
+            predicted_latent=predicted_latent,
+            target_latent=target_latent,
+            slot_loss_weights=slot_loss_weights,
+        )
         decoded_logits = autoencoder.decode_latent(
             latent=predicted_latent,
             future_mask=batch["future_mask"],
@@ -132,6 +138,25 @@ def run_epoch(
             progress_bar.set_postfix(loss=f"{loss.item():.4f}")
 
     return total_loss / max(total_batches, 1)
+
+
+def compute_latent_loss(
+    predicted_latent: torch.Tensor,
+    target_latent: torch.Tensor,
+    slot_loss_weights: list[float] | None,
+) -> torch.Tensor:
+    per_slot_loss = F.mse_loss(predicted_latent, target_latent, reduction="none").mean(dim=-1)
+    if slot_loss_weights is None:
+        return per_slot_loss.mean()
+
+    weight_tensor = predicted_latent.new_tensor(slot_loss_weights, dtype=predicted_latent.dtype)
+    if weight_tensor.numel() != predicted_latent.size(1):
+        raise ValueError(
+            "slot_loss_weights length must match the number of coarse slots "
+            f"({predicted_latent.size(1)}), got {weight_tensor.numel()}."
+        )
+    normalized_weights = weight_tensor / weight_tensor.sum().clamp_min(1e-8)
+    return (per_slot_loss * normalized_weights.unsqueeze(0)).sum(dim=1).mean()
 
 
 def save_checkpoint(
@@ -227,6 +252,7 @@ def main() -> None:
             log_every=train_config.log_every,
             grad_clip_norm=train_config.grad_clip_norm,
             decode_loss_weight=train_config.decode_loss_weight,
+            slot_loss_weights=train_config.slot_loss_weights,
         )
 
         with torch.no_grad():
@@ -240,6 +266,7 @@ def main() -> None:
                 log_every=train_config.log_every,
                 grad_clip_norm=None,
                 decode_loss_weight=train_config.decode_loss_weight,
+                slot_loss_weights=train_config.slot_loss_weights,
             )
 
         print(f"train_loss: {train_loss:.4f}")
