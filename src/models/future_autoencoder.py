@@ -15,6 +15,7 @@ class FutureAutoencoderConfig:
     future_len: int = 16
     coarse_slots: int = 16
     latent_dim: int = 256
+    slot_structure: str = "attention"
     decoder_layers: int = 2
     decoder_heads: int = 8
     decoder_ffn_dim: int = 1024
@@ -54,14 +55,42 @@ class FutureAutoencoder(nn.Module):
         hidden_size = self.future_encoder.config.hidden_size
         vocab_size = self.future_encoder.config.vocab_size
         self.coarse_slots = config.coarse_slots
+        self.slot_structure = config.slot_structure
+        self.block_size = max(config.future_len // max(config.coarse_slots, 1), 1)
 
         self.latent_projection = nn.Linear(hidden_size, config.latent_dim)
-        self.coarse_queries = nn.Parameter(torch.randn(config.coarse_slots, config.latent_dim) * 0.02)
-        self.coarse_cross_attention = nn.MultiheadAttention(
-            embed_dim=config.latent_dim,
-            num_heads=config.decoder_heads,
-            batch_first=True,
-        )
+        if self.slot_structure == "attention":
+            self.coarse_queries = nn.Parameter(torch.randn(config.coarse_slots, config.latent_dim) * 0.02)
+            self.coarse_cross_attention = nn.MultiheadAttention(
+                embed_dim=config.latent_dim,
+                num_heads=config.decoder_heads,
+                batch_first=True,
+            )
+        elif self.slot_structure == "block_causal":
+            if config.future_len % config.coarse_slots != 0:
+                raise ValueError(
+                    "block_causal slot structure requires future_len to be divisible by coarse_slots."
+                )
+            self.block_pool_projection = nn.Linear(config.latent_dim, config.latent_dim)
+            self.slot_position_embeddings = nn.Embedding(config.coarse_slots, config.latent_dim)
+            slot_encoder_layer = nn.TransformerEncoderLayer(
+                d_model=config.latent_dim,
+                nhead=config.decoder_heads,
+                dim_feedforward=config.decoder_ffn_dim,
+                dropout=config.decoder_dropout,
+                activation="gelu",
+                batch_first=True,
+                norm_first=True,
+            )
+            self.slot_transformer = nn.TransformerEncoder(
+                encoder_layer=slot_encoder_layer,
+                num_layers=1,
+            )
+        else:
+            raise ValueError(
+                f"Unsupported slot_structure={config.slot_structure!r}. "
+                "Expected 'attention' or 'block_causal'."
+            )
         self.coarse_layer_norm = nn.LayerNorm(config.latent_dim)
 
         self.expand_queries = nn.Parameter(torch.randn(config.future_len, config.latent_dim) * 0.02)
@@ -120,6 +149,8 @@ class FutureAutoencoder(nn.Module):
     ) -> torch.Tensor:
         if self.coarse_slots == self.config.future_len:
             return token_latent
+        if self.slot_structure == "block_causal":
+            return self.compress_latent_block_causal(token_latent=token_latent, future_mask=future_mask)
         batch_size = token_latent.size(0)
         coarse_queries = self.coarse_queries.unsqueeze(0).expand(batch_size, -1, -1)
         key_padding_mask = future_mask == 0
@@ -131,6 +162,30 @@ class FutureAutoencoder(nn.Module):
             need_weights=False,
         )
         return self.coarse_layer_norm(coarse_queries + coarse_latent)
+
+    def compress_latent_block_causal(
+        self,
+        token_latent: torch.Tensor,
+        future_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        batch_size, _, latent_dim = token_latent.shape
+        block_latent = token_latent.reshape(batch_size, self.coarse_slots, self.block_size, latent_dim)
+        block_mask = future_mask.reshape(batch_size, self.coarse_slots, self.block_size, 1).to(token_latent.dtype)
+
+        pooled_blocks = (block_latent * block_mask).sum(dim=2) / block_mask.sum(dim=2).clamp_min(1.0)
+        pooled_blocks = self.block_pool_projection(pooled_blocks)
+
+        slot_position_ids = torch.arange(self.coarse_slots, device=token_latent.device).unsqueeze(0).expand(
+            batch_size,
+            self.coarse_slots,
+        )
+        slot_inputs = pooled_blocks + self.slot_position_embeddings(slot_position_ids)
+        causal_mask = torch.triu(
+            torch.full((self.coarse_slots, self.coarse_slots), float("-inf"), device=token_latent.device),
+            diagonal=1,
+        )
+        slot_outputs = self.slot_transformer(slot_inputs, mask=causal_mask)
+        return self.coarse_layer_norm(slot_outputs)
 
     def expand_latent(
         self,
