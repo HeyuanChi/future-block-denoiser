@@ -15,6 +15,10 @@ class FutureAutoencoderConfig:
     future_len: int = 16
     coarse_slots: int = 16
     latent_dim: int = 256
+    use_vq: bool = False
+    vq_codebook_size: int = 512
+    vq_commitment_cost: float = 0.25
+    vq_loss_weight: float = 1.0
     decoder_layers: int = 2
     decoder_heads: int = 8
     decoder_ffn_dim: int = 1024
@@ -54,6 +58,7 @@ class FutureAutoencoder(nn.Module):
         hidden_size = self.future_encoder.config.hidden_size
         vocab_size = self.future_encoder.config.vocab_size
         self.coarse_slots = config.coarse_slots
+        self.use_vq = config.use_vq
 
         self.latent_projection = nn.Linear(hidden_size, config.latent_dim)
         self.coarse_queries = nn.Parameter(torch.randn(config.coarse_slots, config.latent_dim) * 0.02)
@@ -63,6 +68,13 @@ class FutureAutoencoder(nn.Module):
             batch_first=True,
         )
         self.coarse_layer_norm = nn.LayerNorm(config.latent_dim)
+        if self.use_vq:
+            self.vq_codebook = nn.Embedding(config.vq_codebook_size, config.latent_dim)
+            self.vq_codebook.weight.data.uniform_(
+                -1.0 / config.vq_codebook_size,
+                1.0 / config.vq_codebook_size,
+            )
+        self._last_vq_loss: torch.Tensor | None = None
 
         self.expand_queries = nn.Parameter(torch.randn(config.future_len, config.latent_dim) * 0.02)
         self.expand_cross_attention = nn.MultiheadAttention(
@@ -111,7 +123,8 @@ class FutureAutoencoder(nn.Module):
             attention_mask=future_mask,
         )
         token_latent = self.latent_projection(encoder_outputs.last_hidden_state)
-        return self.compress_latent(token_latent=token_latent, future_mask=future_mask)
+        coarse_latent = self.compress_latent(token_latent=token_latent, future_mask=future_mask)
+        return self.quantize_latent(coarse_latent)
 
     def compress_latent(
         self,
@@ -147,6 +160,36 @@ class FutureAutoencoder(nn.Module):
             need_weights=False,
         )
         return self.expand_layer_norm(expand_queries + expanded_latent)
+
+    def quantize_latent(
+        self,
+        coarse_latent: torch.Tensor,
+    ) -> torch.Tensor:
+        if not self.use_vq:
+            self._last_vq_loss = coarse_latent.new_zeros(())
+            return coarse_latent
+
+        flat_latent = coarse_latent.reshape(-1, self.config.latent_dim)
+        codebook = self.vq_codebook.weight
+        distances = (
+            flat_latent.pow(2).sum(dim=1, keepdim=True)
+            - 2 * flat_latent @ codebook.t()
+            + codebook.pow(2).sum(dim=1)
+        )
+        code_indices = torch.argmin(distances, dim=1)
+        quantized_latent = self.vq_codebook(code_indices).view_as(coarse_latent)
+
+        codebook_loss = torch.mean((quantized_latent - coarse_latent.detach()) ** 2)
+        commitment_loss = torch.mean((quantized_latent.detach() - coarse_latent) ** 2)
+        self._last_vq_loss = self.config.vq_loss_weight * (
+            codebook_loss + self.config.vq_commitment_cost * commitment_loss
+        )
+        return coarse_latent + (quantized_latent - coarse_latent).detach()
+
+    def get_last_vq_loss(self) -> torch.Tensor:
+        if self._last_vq_loss is None:
+            return next(self.parameters()).new_zeros(())
+        return self._last_vq_loss
 
     def decode_latent(
         self,

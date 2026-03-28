@@ -94,11 +94,12 @@ def run_epoch(
             future_ids=batch["future_ids"],
             future_mask=batch["future_mask"],
         )
-        loss = masked_token_cross_entropy(
+        reconstruction_loss = masked_token_cross_entropy(
             logits=logits,
             target_ids=batch["future_ids"],
             mask=batch["future_mask"],
         )
+        loss = reconstruction_loss + model.get_last_vq_loss()
 
         if is_train:
             loss.backward()
