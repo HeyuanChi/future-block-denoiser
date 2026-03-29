@@ -7,17 +7,20 @@ from typing import Any
 import torch
 from torch import nn
 from transformers import AutoModel
+from transformers import BartForConditionalGeneration
 
 
 @dataclass
 class FutureAutoencoderConfig:
     bert_name: str = "bert-base-uncased"
+    backbone_type: str = "encoder_only"
     future_len: int = 16
     coarse_slots: int = 16
     latent_dim: int = 256
     slot_refinement: str = "none"
     slot_refinement_layers: int = 1
     slot_refinement_scale: float = 0.25
+    freeze_backbone: bool = True
     decoder_layers: int = 2
     decoder_heads: int = 8
     decoder_ffn_dim: int = 1024
@@ -46,16 +49,26 @@ class FutureAutoencoder(nn.Module):
     def __init__(self, config: FutureAutoencoderConfig) -> None:
         super().__init__()
         self.config = config
+        self.backbone_type = config.backbone_type
 
-        self.future_encoder = AutoModel.from_pretrained(config.bert_name)
-        if not hasattr(self.future_encoder, "encoder") or not hasattr(self.future_encoder.encoder, "layer"):
-            raise ValueError(
-                f"Backbone {config.bert_name} does not expose encoder.layer; "
-                "only BERT/RoBERTa-style encoder backbones are currently supported."
-            )
-        self.future_encoder.encoder.layer = nn.ModuleList(self.future_encoder.encoder.layer[:2])
-        hidden_size = self.future_encoder.config.hidden_size
-        vocab_size = self.future_encoder.config.vocab_size
+        if self.backbone_type == "encoder_only":
+            self.future_encoder = AutoModel.from_pretrained(config.bert_name)
+            if not hasattr(self.future_encoder, "encoder") or not hasattr(self.future_encoder.encoder, "layer"):
+                raise ValueError(
+                    f"Backbone {config.bert_name} does not expose encoder.layer; "
+                    "only BERT/RoBERTa-style encoder backbones are currently supported."
+                )
+            self.future_encoder.encoder.layer = nn.ModuleList(self.future_encoder.encoder.layer[:2])
+            hidden_size = self.future_encoder.config.hidden_size
+            vocab_size = self.future_encoder.config.vocab_size
+            self.seq2seq_backbone = None
+        elif self.backbone_type == "bart":
+            self.seq2seq_backbone = BartForConditionalGeneration.from_pretrained(config.bert_name)
+            self.future_encoder = None
+            hidden_size = self.seq2seq_backbone.config.d_model
+            vocab_size = self.seq2seq_backbone.config.vocab_size
+        else:
+            raise ValueError(f"Unsupported backbone_type={self.backbone_type!r}.")
         self.coarse_slots = config.coarse_slots
         self.slot_refinement = config.slot_refinement
 
@@ -96,26 +109,38 @@ class FutureAutoencoder(nn.Module):
         )
         self.expand_layer_norm = nn.LayerNorm(config.latent_dim)
         self.latent_to_hidden = nn.Linear(config.latent_dim, hidden_size)
-        self.decoder_position_embeddings = nn.Embedding(config.future_len, hidden_size)
-        self.decoder_layer_norm = nn.LayerNorm(hidden_size)
+        if self.backbone_type == "encoder_only":
+            self.decoder_position_embeddings = nn.Embedding(config.future_len, hidden_size)
+            self.decoder_layer_norm = nn.LayerNorm(hidden_size)
 
-        decoder_layer = nn.TransformerEncoderLayer(
-            d_model=hidden_size,
-            nhead=config.decoder_heads,
-            dim_feedforward=config.decoder_ffn_dim,
-            dropout=config.decoder_dropout,
-            activation="gelu",
-            batch_first=True,
-            norm_first=True,
-        )
-        self.decoder = nn.TransformerEncoder(
-            encoder_layer=decoder_layer,
-            num_layers=config.decoder_layers,
-        )
-        self.lm_head = nn.Linear(hidden_size, vocab_size)
+            decoder_layer = nn.TransformerEncoderLayer(
+                d_model=hidden_size,
+                nhead=config.decoder_heads,
+                dim_feedforward=config.decoder_ffn_dim,
+                dropout=config.decoder_dropout,
+                activation="gelu",
+                batch_first=True,
+                norm_first=True,
+            )
+            self.decoder = nn.TransformerEncoder(
+                encoder_layer=decoder_layer,
+                num_layers=config.decoder_layers,
+            )
+            self.lm_head = nn.Linear(hidden_size, vocab_size)
+            self.decoder_queries = None
+        else:
+            self.decoder = None
+            self.decoder_position_embeddings = None
+            self.decoder_layer_norm = None
+            self.lm_head = None
+            self.decoder_queries = nn.Parameter(torch.randn(config.future_len, hidden_size) * 0.02)
 
     def freeze_bert_backbone(self) -> None:
-        for parameter in self.future_encoder.parameters():
+        if self.backbone_type == "encoder_only":
+            for parameter in self.future_encoder.parameters():
+                parameter.requires_grad = False
+            return
+        for parameter in self.seq2seq_backbone.parameters():
             parameter.requires_grad = False
 
     def encode_future(
@@ -130,11 +155,19 @@ class FutureAutoencoder(nn.Module):
         Returns:
             latent: [B, coarse_slots, latent_dim]
         """
-        encoder_outputs = self.future_encoder(
-            input_ids=future_ids,
-            attention_mask=future_mask,
-        )
-        token_latent = self.latent_projection(encoder_outputs.last_hidden_state)
+        if self.backbone_type == "encoder_only":
+            encoder_outputs = self.future_encoder(
+                input_ids=future_ids,
+                attention_mask=future_mask,
+            )
+            token_latent = self.latent_projection(encoder_outputs.last_hidden_state)
+        else:
+            encoder_outputs = self.seq2seq_backbone.model.encoder(
+                input_ids=future_ids,
+                attention_mask=future_mask,
+                return_dict=True,
+            )
+            token_latent = self.latent_projection(encoder_outputs.last_hidden_state)
         return self.compress_latent(token_latent=token_latent, future_mask=future_mask)
 
     def compress_latent(
@@ -208,6 +241,9 @@ class FutureAutoencoder(nn.Module):
         if latent.size(1) != self.config.future_len:
             latent = self.expand_latent(latent)
 
+        if self.backbone_type == "bart":
+            return self.decode_latent_with_bart(latent=latent, future_mask=future_mask)
+
         batch_size, seq_len, _ = latent.shape
         hidden_states = self.latent_to_hidden(latent)
 
@@ -218,6 +254,27 @@ class FutureAutoencoder(nn.Module):
         padding_mask = future_mask == 0
         hidden_states = self.decoder(hidden_states, src_key_padding_mask=padding_mask)
         logits = self.lm_head(hidden_states)
+        return logits
+
+    def decode_latent_with_bart(
+        self,
+        latent: torch.Tensor,
+        future_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        batch_size, seq_len, _ = latent.shape
+        encoder_hidden_states = self.latent_to_hidden(latent)
+        decoder_inputs_embeds = self.decoder_queries.unsqueeze(0).expand(batch_size, seq_len, -1)
+        decoder_attention_mask = future_mask
+        decoder_outputs = self.seq2seq_backbone.model.decoder(
+            input_ids=None,
+            attention_mask=decoder_attention_mask,
+            encoder_hidden_states=encoder_hidden_states,
+            encoder_attention_mask=future_mask,
+            inputs_embeds=decoder_inputs_embeds,
+            return_dict=True,
+        )
+        logits = self.seq2seq_backbone.lm_head(decoder_outputs.last_hidden_state)
+        logits = logits + self.seq2seq_backbone.final_logits_bias
         return logits
 
     def forward(

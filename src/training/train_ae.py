@@ -170,7 +170,8 @@ def main() -> None:
     _, train_loader, val_loader = build_dataloaders(data_config)
 
     model = FutureAutoencoder(model_config)
-    model.freeze_bert_backbone()
+    if model_config.freeze_backbone:
+        model.freeze_bert_backbone()
     model.to(device)
 
     trainable_parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]

@@ -1,0 +1,36 @@
+data:
+  dataset_name: Salesforce/wikitext
+  dataset_config: wikitext-2-raw-v1
+  tokenizer_name: facebook/bart-base
+  prefix_len: 64
+  future_len: 16
+  stride: 16
+  batch_size: 128
+  num_workers: 8
+  max_train_samples: null
+  max_val_samples: null
+
+model:
+  bert_name: facebook/bart-base
+  backbone_type: bart
+  future_len: 16
+  coarse_slots: 8
+  latent_dim: 512
+  slot_refinement: none
+  freeze_backbone: true
+  decoder_layers: 2
+  decoder_heads: 8
+  decoder_ffn_dim: 1024
+  decoder_dropout: 0.1
+
+training:
+  learning_rate: 0.0003
+  weight_decay: 0.0
+  num_epochs: 50
+  device: auto
+  log_every: 100
+  checkpoint_dir: outputs/checkpoints/ae_bart_latent
+  log_dir: outputs/logs/ae_bart_latent
+  save_every_epoch: false
+  grad_clip_norm: 1.0
+  warmup_ratio: 0.05
