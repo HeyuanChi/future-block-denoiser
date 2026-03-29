@@ -67,6 +67,7 @@ def iterative_refine_latent(
     context_mask: torch.Tensor,
     num_steps: int,
     start_latent: torch.Tensor | None = None,
+    start_timestep: int | None = None,
 ) -> torch.Tensor:
     """
     Runs a deterministic reverse diffusion loop from Gaussian noise.
@@ -81,7 +82,12 @@ def iterative_refine_latent(
     latent_mask = torch.ones(batch_size, latent_len, device=context_states.device, dtype=context_mask.dtype)
     self_condition_latent = None
 
-    for timestep in reversed(range(num_steps)):
+    if start_timestep is None:
+        timestep_values = reversed(range(num_steps))
+    else:
+        timestep_values = reversed(range(start_timestep + 1))
+
+    for timestep in timestep_values:
         timestep_tensor = torch.full((batch_size,), timestep, device=context_states.device, dtype=torch.long)
         predicted_clean = denoiser(
             noisy_latent=latent,
@@ -137,6 +143,7 @@ def main() -> None:
     parser.add_argument("--compare-num-steps", type=str, default=None)
     parser.add_argument("--compare-start-t", type=str, default=None)
     parser.add_argument("--predictor-init-config", type=str, default=None)
+    parser.add_argument("--predictor-init-timestep", type=int, default=None)
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -282,7 +289,7 @@ def main() -> None:
         print(f"\nDenoised Prediction ({steps} steps):")
         print(denoised_text)
         print(f"Latent MSE to AE target ({steps} steps): {latent_mse:.4f}")
-        if predictor_init_latent is not None:
+        if predictor_init_latent is not None and args.predictor_init_timestep is None:
             with torch.no_grad():
                 refined_latent = iterative_refine_latent(
                     denoiser=denoiser,
@@ -303,6 +310,39 @@ def main() -> None:
             print(f"\nPredictor-Init Refined ({steps} steps):")
             print(refined_text)
             print(f"Predictor-init refined latent MSE to AE target ({steps} steps): {refined_mse:.4f}")
+
+    if predictor_init_latent is not None and args.predictor_init_timestep is not None:
+        if args.predictor_init_timestep < 0 or args.predictor_init_timestep >= denoiser_config.num_diffusion_steps:
+            raise ValueError(
+                f"predictor_init_timestep {args.predictor_init_timestep} is out of range for "
+                f"num_diffusion_steps={denoiser_config.num_diffusion_steps}."
+            )
+        alpha_bar = noise_schedule.alpha_bars[args.predictor_init_timestep].view(1, 1, 1)
+        predictor_noisy_start = predictor_init_latent + torch.sqrt(1.0 - alpha_bar) * torch.randn_like(predictor_init_latent)
+        with torch.no_grad():
+            refined_latent = iterative_refine_latent(
+                denoiser=denoiser,
+                noise_schedule=noise_schedule,
+                context_states=context_states,
+                context_mask=context_mask,
+                num_steps=args.predictor_init_timestep + 1,
+                start_latent=predictor_noisy_start,
+                start_timestep=args.predictor_init_timestep,
+            )
+            refined_logits = autoencoder.decode_latent(
+                latent=refined_latent,
+                future_mask=batch["future_mask"],
+            )
+            refined_prediction_ids = refined_logits.argmax(dim=-1)
+            refined_mse = torch.mean((refined_latent - target_latent) ** 2).item()
+
+        refined_text = decode_ids(tokenizer, refined_prediction_ids[0].cpu())
+        print(f"\nPredictor-Noisy-Init Refined (start t={args.predictor_init_timestep}):")
+        print(refined_text)
+        print(
+            f"Predictor-noisy-init refined latent MSE to AE target (start t={args.predictor_init_timestep}): "
+            f"{refined_mse:.4f}"
+        )
 
     for start_t in start_t_list:
         if start_t < 0 or start_t >= denoiser_config.num_diffusion_steps:
