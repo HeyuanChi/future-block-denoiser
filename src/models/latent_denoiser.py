@@ -14,8 +14,8 @@ class LatentDenoiserConfig:
     prefix_len: int = 64
     future_len: int = 16
     coarse_slots: int | None = None
-    use_initializer: bool = False
     num_diffusion_steps: int = 100
+    self_conditioning: bool = True
     denoiser_layers: int = 4
     denoiser_heads: int = 8
     denoiser_ffn_dim: int = 1024
@@ -31,16 +31,17 @@ class LatentDenoiserConfig:
 
 class LatentDenoiser(nn.Module):
     """
-    Predicts diffusion noise for future latents from noisy future latents and prefix states.
+    Predicts clean future latents from noisy future latents and context states.
 
     Inputs:
         noisy_latent: [B, F, D]
-        prefix_states: [B, P, D]
+        context_states: [B, P, D]
+        self_condition_latent: [B, F, D] | None
         timesteps: [B]
-        prefix_mask: [B, P]
+        context_mask: [B, P]
         future_mask: [B, F]
     Output:
-        predicted_noise: [B, F, D]
+        predicted_clean_latent: [B, F, D]
     """
 
     def __init__(self, config: LatentDenoiserConfig) -> None:
@@ -52,11 +53,8 @@ class LatentDenoiser(nn.Module):
         self.position_embedding = nn.Embedding(config.prefix_len + self.latent_len, config.latent_dim)
         self.segment_embedding = nn.Embedding(2, config.latent_dim)
         self.input_layer_norm = nn.LayerNorm(config.latent_dim)
-        if config.use_initializer:
-            self.initializer_queries = nn.Parameter(torch.randn(self.latent_len, config.latent_dim) * 0.02)
-            self.initializer_position_embedding = nn.Embedding(config.prefix_len + self.latent_len, config.latent_dim)
-            self.initializer_segment_embedding = nn.Embedding(2, config.latent_dim)
-            self.initializer_layer_norm = nn.LayerNorm(config.latent_dim)
+        self.self_condition_projection = nn.Linear(config.latent_dim, config.latent_dim)
+        self.self_condition_layer_norm = nn.LayerNorm(config.latent_dim)
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=config.latent_dim,
@@ -73,63 +71,34 @@ class LatentDenoiser(nn.Module):
         )
         self.output_projection = nn.Linear(config.latent_dim, config.latent_dim)
 
-    def initialize_latent(
-        self,
-        prefix_states: torch.Tensor,
-        prefix_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        if not self.config.use_initializer:
-            raise ValueError("initialize_latent requires use_initializer=True.")
-
-        batch_size, prefix_len, _ = prefix_states.shape
-        init_queries = self.initializer_queries.unsqueeze(0).expand(batch_size, -1, -1)
-        latent_len = init_queries.size(1)
-        token_states = torch.cat([prefix_states, init_queries], dim=1)
-
-        position_ids = torch.arange(prefix_len + latent_len, device=prefix_states.device).unsqueeze(0).expand(
-            batch_size,
-            prefix_len + latent_len,
-        )
-        segment_ids = torch.cat(
-            [
-                torch.zeros(batch_size, prefix_len, device=prefix_states.device, dtype=torch.long),
-                torch.ones(batch_size, latent_len, device=prefix_states.device, dtype=torch.long),
-            ],
-            dim=1,
-        )
-
-        token_states = token_states + self.initializer_position_embedding(position_ids)
-        token_states = token_states + self.initializer_segment_embedding(segment_ids)
-        token_states = self.initializer_layer_norm(token_states)
-
-        latent_mask = torch.ones(batch_size, latent_len, device=prefix_states.device, dtype=prefix_mask.dtype)
-        padding_mask = torch.cat([prefix_mask, latent_mask], dim=1) == 0
-        token_states = self.transformer(token_states, src_key_padding_mask=padding_mask)
-        latent_states = token_states[:, prefix_len:, :]
-        return self.output_projection(latent_states)
-
     def forward(
         self,
         noisy_latent: torch.Tensor,
-        prefix_states: torch.Tensor,
+        context_states: torch.Tensor,
+        context_mask: torch.Tensor,
         timesteps: torch.Tensor,
-        prefix_mask: torch.Tensor,
         future_mask: torch.Tensor,
+        self_condition_latent: torch.Tensor | None = None,
     ) -> torch.Tensor:
         batch_size, future_len, _ = noisy_latent.shape
-        prefix_len = prefix_states.size(1)
+        context_len = context_states.size(1)
 
         timestep_embed = self.timestep_embedding(timesteps).unsqueeze(1)
         future_states = noisy_latent + timestep_embed
+        if self.config.self_conditioning:
+            if self_condition_latent is None:
+                self_condition_latent = torch.zeros_like(noisy_latent)
+            future_states = future_states + self.self_condition_projection(self_condition_latent)
+            future_states = self.self_condition_layer_norm(future_states)
 
-        token_states = torch.cat([prefix_states, future_states], dim=1)
+        token_states = torch.cat([context_states, future_states], dim=1)
 
-        position_ids = torch.arange(prefix_len + future_len, device=noisy_latent.device)
-        position_ids = position_ids.unsqueeze(0).expand(batch_size, prefix_len + future_len)
+        position_ids = torch.arange(context_len + future_len, device=noisy_latent.device)
+        position_ids = position_ids.unsqueeze(0).expand(batch_size, context_len + future_len)
 
         segment_ids = torch.cat(
             [
-                torch.zeros(batch_size, prefix_len, device=noisy_latent.device, dtype=torch.long),
+                torch.zeros(batch_size, context_len, device=noisy_latent.device, dtype=torch.long),
                 torch.ones(batch_size, future_len, device=noisy_latent.device, dtype=torch.long),
             ],
             dim=1,
@@ -138,8 +107,8 @@ class LatentDenoiser(nn.Module):
         token_states = token_states + self.position_embedding(position_ids) + self.segment_embedding(segment_ids)
         token_states = self.input_layer_norm(token_states)
 
-        padding_mask = torch.cat([prefix_mask, future_mask], dim=1) == 0
+        padding_mask = torch.cat([context_mask, future_mask], dim=1) == 0
         token_states = self.transformer(token_states, src_key_padding_mask=padding_mask)
 
-        future_states = token_states[:, prefix_len:, :]
+        future_states = token_states[:, context_len:, :]
         return self.output_projection(future_states)

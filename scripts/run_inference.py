@@ -11,7 +11,6 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.data.dataset import DataConfig, build_dataloaders
-from src.models.future_autoencoder import FutureAutoencoderConfig
 from src.models.latent_denoiser import LatentDenoiser, LatentDenoiserConfig
 from src.models.context_encoder import ContextEncoder, ContextEncoderConfig
 from src.training.train_ae import load_config, move_batch_to_device, resolve_device
@@ -22,7 +21,7 @@ from src.utils.noise_schedule import DiffusionNoiseSchedule
 def load_denoiser_components(
     config: dict,
     device: torch.device,
-) -> tuple[torch.nn.Module, PrefixEncoder, LatentDenoiser]:
+) -> tuple[torch.nn.Module, ContextEncoder, LatentDenoiser]:
     autoencoder = load_autoencoder(
         config=config,
         checkpoint_path=config["training"]["ae_checkpoint_path"],
@@ -32,13 +31,9 @@ def load_denoiser_components(
     context_encoder = ContextEncoder(ContextEncoderConfig.from_dict(config)).to(device)
     denoiser = LatentDenoiser(LatentDenoiserConfig.from_dict(config)).to(device)
 
-    checkpoint = torch.load(
-        config["training"]["denoiser_checkpoint_path"],
-        map_location=device,
-    )
-    context_encoder.load_state_dict(
-        checkpoint.get("context_encoder_state_dict", checkpoint["prefix_encoder_state_dict"])
-    )
+    checkpoint_path = Path(config["training"]["checkpoint_dir"]) / "denoiser_best.pt"
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    context_encoder.load_state_dict(checkpoint["context_encoder_state_dict"])
     denoiser.load_state_dict(checkpoint["denoiser_state_dict"])
 
     context_encoder.eval()
@@ -49,40 +44,36 @@ def load_denoiser_components(
 def iterative_refine_latent(
     denoiser: LatentDenoiser,
     noise_schedule: DiffusionNoiseSchedule,
-    prefix_states: torch.Tensor,
-    prefix_mask: torch.Tensor,
-    future_mask: torch.Tensor,
+    context_states: torch.Tensor,
+    context_mask: torch.Tensor,
     num_steps: int,
 ) -> torch.Tensor:
     """
     Runs a deterministic reverse diffusion loop from Gaussian noise.
     """
-    batch_size = prefix_states.size(0)
+    batch_size = context_states.size(0)
     latent_len = denoiser.latent_len
     latent_dim = denoiser.config.latent_dim
-    if denoiser.config.use_initializer:
-        latent = denoiser.initialize_latent(
-            prefix_states=prefix_states,
-            prefix_mask=prefix_mask,
-        )
-    else:
-        latent = torch.randn(batch_size, latent_len, latent_dim, device=prefix_states.device)
-    latent_mask = torch.ones(batch_size, latent_len, device=prefix_states.device, dtype=prefix_mask.dtype)
+    latent = torch.randn(batch_size, latent_len, latent_dim, device=context_states.device)
+    latent_mask = torch.ones(batch_size, latent_len, device=context_states.device, dtype=context_mask.dtype)
+    self_condition_latent = None
 
     for timestep in reversed(range(num_steps)):
-        timestep_tensor = torch.full((batch_size,), timestep, device=prefix_states.device, dtype=torch.long)
-        predicted_noise = denoiser(
+        timestep_tensor = torch.full((batch_size,), timestep, device=context_states.device, dtype=torch.long)
+        predicted_clean = denoiser(
             noisy_latent=latent,
-            prefix_states=prefix_states,
+            context_states=context_states,
+            context_mask=context_mask,
             timesteps=timestep_tensor,
-            prefix_mask=prefix_mask,
             future_mask=latent_mask,
+            self_condition_latent=self_condition_latent,
         )
-        latent = noise_schedule.step_ddpm_mean(
+        latent = noise_schedule.step_ddpm_mean_from_clean(
             noisy_latent=latent,
-            predicted_noise=predicted_noise,
+            predicted_clean=predicted_clean,
             timesteps=timestep_tensor,
         )
+        self_condition_latent = predicted_clean
 
     return latent
 
@@ -99,8 +90,6 @@ def main() -> None:
     args = parser.parse_args()
 
     config = load_config(args.config)
-    config["training"].setdefault("ae_checkpoint_path", "outputs/checkpoints/ae_best.pt")
-    config["training"].setdefault("denoiser_checkpoint_path", "outputs/checkpoints/denoiser_best.pt")
 
     data_config = DataConfig.from_dict(config)
     data_config.batch_size = 1
@@ -114,6 +103,7 @@ def main() -> None:
     num_steps = args.num_steps or denoiser_config.num_diffusion_steps
     noise_schedule = DiffusionNoiseSchedule(
         num_steps=denoiser_config.num_diffusion_steps,
+        schedule_type=config["model"].get("noise_schedule", "sqrt"),
         device=device,
     )
 
@@ -143,9 +133,8 @@ def main() -> None:
         denoised_latent = iterative_refine_latent(
             denoiser=denoiser,
             noise_schedule=noise_schedule,
-            prefix_states=context_states,
-            prefix_mask=context_mask,
-            future_mask=batch["future_mask"],
+            context_states=context_states,
+            context_mask=context_mask,
             num_steps=num_steps,
         )
         denoised_logits = autoencoder.decode_latent(
@@ -161,22 +150,18 @@ def main() -> None:
             dtype=torch.long,
         )
         oracle_noisy_latent, _ = noise_schedule.add_noise(target_latent, oracle_timestep)
-        oracle_predicted_noise = denoiser(
+        oracle_latent = denoiser(
             noisy_latent=oracle_noisy_latent,
-            prefix_states=context_states,
+            context_states=context_states,
+            context_mask=context_mask,
             timesteps=oracle_timestep,
-            prefix_mask=context_mask,
             future_mask=torch.ones(
                 target_latent.size(0),
                 target_latent.size(1),
                 device=device,
                 dtype=batch["future_mask"].dtype,
             ),
-        )
-        oracle_latent = noise_schedule.predict_clean_from_noise(
-            noisy_latent=oracle_noisy_latent,
-            predicted_noise=oracle_predicted_noise,
-            timesteps=oracle_timestep,
+            self_condition_latent=None,
         )
         oracle_logits = autoencoder.decode_latent(
             latent=oracle_latent,

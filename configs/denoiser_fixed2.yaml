@@ -16,6 +16,9 @@ model:
   prefix_len: 64
   future_len: 16
   num_diffusion_steps: 2
+  noise_schedule: sqrt
+  timestep_sampling: loss_aware
+  self_conditioning: true
   denoiser_layers: 4
   denoiser_heads: 8
   denoiser_ffn_dim: 1024
@@ -23,8 +26,6 @@ model:
 
 training:
   ae_checkpoint_path: outputs/checkpoints/ae_best.pt
-  denoiser_checkpoint_path: outputs/checkpoints/fixed2_roberta/denoiser_best.pt
-  resume_from_checkpoint: null
   learning_rate: 0.0001
   weight_decay: 0.0
   num_epochs: 100
@@ -33,3 +34,5 @@ training:
   checkpoint_dir: outputs/checkpoints/fixed2_roberta
   log_dir: outputs/logs/fixed2_roberta
   save_every_epoch: true
+  grad_clip_norm: 1.0
+  warmup_ratio: 0.05

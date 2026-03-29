@@ -27,7 +27,6 @@ from src.utils.metrics import masked_token_cross_entropy
 @dataclass
 class PredictorTrainConfig:
     ae_checkpoint_path: str = "outputs/checkpoints/ae_four_slot_roberta_stable/ae_best.pt"
-    resume_from_checkpoint: str | None = None
     learning_rate: float = 1e-4
     weight_decay: float = 0.0
     num_epochs: int = 100

@@ -16,6 +16,9 @@ model:
   prefix_len: 64
   future_len: 16
   num_diffusion_steps: 100
+  noise_schedule: sqrt
+  timestep_sampling: loss_aware
+  self_conditioning: true
   denoiser_layers: 4
   denoiser_heads: 8
   denoiser_ffn_dim: 1024
@@ -23,14 +26,13 @@ model:
 
 training:
   ae_checkpoint_path: outputs/checkpoints/ae_best.pt
-  denoiser_checkpoint_path: outputs/checkpoints/denoiser_best.pt
-  resume_from_checkpoint: null
   learning_rate: 0.0001
   weight_decay: 0.0
-  # resume_from_checkpoint: outputs/checkpoints/denoiser_epoch_50.pt
   num_epochs: 500
   device: auto
   log_every: 100
   checkpoint_dir: outputs/checkpoints
   log_dir: outputs/logs
   save_every_epoch: true
+  grad_clip_norm: 1.0
+  warmup_ratio: 0.05
