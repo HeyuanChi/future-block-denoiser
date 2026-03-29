@@ -78,6 +78,18 @@ def iterative_refine_latent(
     return latent
 
 
+def parse_num_steps_list(num_steps_text: str) -> list[int]:
+    values = []
+    for chunk in num_steps_text.split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        values.append(int(chunk))
+    if not values:
+        raise ValueError("Expected at least one integer in --compare-num-steps.")
+    return values
+
+
 def decode_ids(tokenizer, token_ids: torch.Tensor) -> str:
     return tokenizer.decode(token_ids.tolist(), skip_special_tokens=True)
 
@@ -87,6 +99,7 @@ def main() -> None:
     parser.add_argument("--config", type=str, default="configs/denoiser.yaml")
     parser.add_argument("--sample-index", type=int, default=0)
     parser.add_argument("--num-steps", type=int, default=None)
+    parser.add_argument("--compare-num-steps", type=str, default=None)
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -101,6 +114,10 @@ def main() -> None:
 
     denoiser_config = LatentDenoiserConfig.from_dict(config)
     num_steps = args.num_steps or denoiser_config.num_diffusion_steps
+    if args.compare_num_steps is not None:
+        num_steps_list = parse_num_steps_list(args.compare_num_steps)
+    else:
+        num_steps_list = [num_steps]
     noise_schedule = DiffusionNoiseSchedule(
         num_steps=denoiser_config.num_diffusion_steps,
         schedule_type=config["model"].get("noise_schedule", "sqrt"),
@@ -130,18 +147,6 @@ def main() -> None:
             context_ids=context_ids,
             context_mask=context_mask,
         )
-        denoised_latent = iterative_refine_latent(
-            denoiser=denoiser,
-            noise_schedule=noise_schedule,
-            context_states=context_states,
-            context_mask=context_mask,
-            num_steps=num_steps,
-        )
-        denoised_logits = autoencoder.decode_latent(
-            latent=denoised_latent,
-            future_mask=batch["future_mask"],
-        )
-        denoised_prediction_ids = denoised_logits.argmax(dim=-1)
 
         oracle_timestep = torch.full(
             (batch["future_ids"].size(0),),
@@ -169,13 +174,11 @@ def main() -> None:
         )
         oracle_prediction_ids = oracle_logits.argmax(dim=-1)
 
-        latent_mse = torch.mean((denoised_latent - target_latent) ** 2).item()
         oracle_latent_mse = torch.mean((oracle_latent - target_latent) ** 2).item()
 
     prefix_text = decode_ids(tokenizer, batch["prefix_ids"][0].cpu())
     future_text = decode_ids(tokenizer, batch["future_ids"][0].cpu())
     ae_text = decode_ids(tokenizer, ae_prediction_ids[0].cpu())
-    denoised_text = decode_ids(tokenizer, denoised_prediction_ids[0].cpu())
     oracle_text = decode_ids(tokenizer, oracle_prediction_ids[0].cpu())
 
     print("\nPrefix:")
@@ -184,12 +187,30 @@ def main() -> None:
     print(future_text)
     print("\nAE Reconstruction:")
     print(ae_text)
-    print("\nDenoised Prediction:")
-    print(denoised_text)
     print("\nOracle Denoise From True Latent + Noise:")
     print(oracle_text)
-    print(f"\nLatent MSE to AE target: {latent_mse:.4f}")
     print(f"Oracle latent MSE to AE target: {oracle_latent_mse:.4f}")
+
+    for steps in num_steps_list:
+        with torch.no_grad():
+            denoised_latent = iterative_refine_latent(
+                denoiser=denoiser,
+                noise_schedule=noise_schedule,
+                context_states=context_states,
+                context_mask=context_mask,
+                num_steps=steps,
+            )
+            denoised_logits = autoencoder.decode_latent(
+                latent=denoised_latent,
+                future_mask=batch["future_mask"],
+            )
+            denoised_prediction_ids = denoised_logits.argmax(dim=-1)
+            latent_mse = torch.mean((denoised_latent - target_latent) ** 2).item()
+
+        denoised_text = decode_ids(tokenizer, denoised_prediction_ids[0].cpu())
+        print(f"\nDenoised Prediction ({steps} steps):")
+        print(denoised_text)
+        print(f"Latent MSE to AE target ({steps} steps): {latent_mse:.4f}")
 
 
 if __name__ == "__main__":
