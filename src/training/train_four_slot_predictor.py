@@ -38,6 +38,8 @@ class PredictorTrainConfig:
     save_every_epoch: bool = False
     grad_clip_norm: float | None = 1.0
     decode_loss_weight: float = 0.2
+    kl_weight: float = 0.01
+    kl_warmup_epochs: int = 10
 
     @classmethod
     def from_dict(cls, config: dict[str, Any]) -> "PredictorTrainConfig":
@@ -74,6 +76,7 @@ def run_epoch(
     log_every: int,
     grad_clip_norm: float | None,
     decode_loss_weight: float,
+    kl_weight: float,
 ) -> float:
     is_train = optimizer is not None
     prefix_encoder.train(is_train)
@@ -102,9 +105,11 @@ def run_epoch(
         predicted_latent = predictor(
             prefix_states=prefix_states,
             prefix_mask=batch["prefix_mask"],
+            target_latent=target_latent if is_train else None,
         )
 
         latent_loss = F.mse_loss(predicted_latent, target_latent)
+        kl_loss = predictor.get_last_kl_loss()
         decoded_logits = autoencoder.decode_latent(
             latent=predicted_latent,
             future_mask=batch["future_mask"],
@@ -114,7 +119,7 @@ def run_epoch(
             target_ids=batch["future_ids"],
             mask=batch["future_mask"],
         )
-        loss = latent_loss + decode_loss_weight * decode_loss
+        loss = latent_loss + decode_loss_weight * decode_loss + kl_weight * kl_loss
 
         if is_train:
             loss.backward()
@@ -227,6 +232,7 @@ def main() -> None:
             log_every=train_config.log_every,
             grad_clip_norm=train_config.grad_clip_norm,
             decode_loss_weight=train_config.decode_loss_weight,
+            kl_weight=train_config.kl_weight * min(epoch / max(train_config.kl_warmup_epochs, 1), 1.0),
         )
 
         with torch.no_grad():
@@ -240,6 +246,7 @@ def main() -> None:
                 log_every=train_config.log_every,
                 grad_clip_norm=None,
                 decode_loss_weight=train_config.decode_loss_weight,
+                kl_weight=0.0,
             )
 
         print(f"train_loss: {train_loss:.4f}")
