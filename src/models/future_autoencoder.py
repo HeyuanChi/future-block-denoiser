@@ -5,9 +5,13 @@ from dataclasses import fields
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 from transformers import AutoModel
 from transformers import BartForConditionalGeneration
+from transformers.modeling_outputs import BaseModelOutput
+
+from src.models.perceiver_bottleneck import PerceiverAutoEncoder
 
 
 @dataclass
@@ -17,6 +21,9 @@ class FutureAutoencoderConfig:
     future_len: int = 16
     coarse_slots: int = 16
     latent_dim: int = 256
+    decoder_latents: int | None = None
+    latent_bottleneck_depth: int = 2
+    l2_normalize_latents: bool = False
     slot_refinement: str = "none"
     slot_refinement_layers: int = 1
     slot_refinement_scale: float = 0.25
@@ -72,14 +79,31 @@ class FutureAutoencoder(nn.Module):
         self.coarse_slots = config.coarse_slots
         self.slot_refinement = config.slot_refinement
 
-        self.latent_projection = nn.Linear(hidden_size, config.latent_dim)
-        self.coarse_queries = nn.Parameter(torch.randn(config.coarse_slots, config.latent_dim) * 0.02)
-        self.coarse_cross_attention = nn.MultiheadAttention(
-            embed_dim=config.latent_dim,
-            num_heads=config.decoder_heads,
-            batch_first=True,
-        )
-        self.coarse_layer_norm = nn.LayerNorm(config.latent_dim)
+        if self.backbone_type == "bart":
+            decoder_latents = config.decoder_latents or config.future_len
+            self.perceiver_ae = PerceiverAutoEncoder(
+                dim_lm=hidden_size,
+                dim_ae=config.latent_dim,
+                depth=config.latent_bottleneck_depth,
+                num_encoder_latents=config.coarse_slots,
+                num_decoder_latents=decoder_latents,
+                max_seq_len=config.future_len,
+                l2_normalize_latents=config.l2_normalize_latents,
+            )
+            self.latent_projection = None
+            self.coarse_queries = None
+            self.coarse_cross_attention = None
+            self.coarse_layer_norm = None
+        else:
+            self.perceiver_ae = None
+            self.latent_projection = nn.Linear(hidden_size, config.latent_dim)
+            self.coarse_queries = nn.Parameter(torch.randn(config.coarse_slots, config.latent_dim) * 0.02)
+            self.coarse_cross_attention = nn.MultiheadAttention(
+                embed_dim=config.latent_dim,
+                num_heads=config.decoder_heads,
+                batch_first=True,
+            )
+            self.coarse_layer_norm = nn.LayerNorm(config.latent_dim)
         if self.slot_refinement == "causal_residual":
             self.slot_position_embeddings = nn.Embedding(config.coarse_slots, config.latent_dim)
             slot_encoder_layer = nn.TransformerEncoderLayer(
@@ -101,13 +125,18 @@ class FutureAutoencoder(nn.Module):
                 "Expected 'none' or 'causal_residual'."
             )
 
-        self.expand_queries = nn.Parameter(torch.randn(config.future_len, config.latent_dim) * 0.02)
-        self.expand_cross_attention = nn.MultiheadAttention(
-            embed_dim=config.latent_dim,
-            num_heads=config.decoder_heads,
-            batch_first=True,
-        )
-        self.expand_layer_norm = nn.LayerNorm(config.latent_dim)
+        if self.backbone_type == "bart":
+            self.expand_queries = None
+            self.expand_cross_attention = None
+            self.expand_layer_norm = None
+        else:
+            self.expand_queries = nn.Parameter(torch.randn(config.future_len, config.latent_dim) * 0.02)
+            self.expand_cross_attention = nn.MultiheadAttention(
+                embed_dim=config.latent_dim,
+                num_heads=config.decoder_heads,
+                batch_first=True,
+            )
+            self.expand_layer_norm = nn.LayerNorm(config.latent_dim)
         self.latent_to_hidden = nn.Linear(config.latent_dim, hidden_size)
         if self.backbone_type == "encoder_only":
             self.decoder_position_embeddings = nn.Embedding(config.future_len, hidden_size)
@@ -161,20 +190,23 @@ class FutureAutoencoder(nn.Module):
                 attention_mask=future_mask,
             )
             token_latent = self.latent_projection(encoder_outputs.last_hidden_state)
+            return self.compress_latent(token_latent=token_latent, future_mask=future_mask)
         else:
             encoder_outputs = self.seq2seq_backbone.model.encoder(
                 input_ids=future_ids,
                 attention_mask=future_mask,
                 return_dict=True,
             )
-            token_latent = self.latent_projection(encoder_outputs.last_hidden_state)
-        return self.compress_latent(token_latent=token_latent, future_mask=future_mask)
+            latent = self.perceiver_ae.encode(encoder_outputs.last_hidden_state, future_mask)
+            return self.refine_slots(latent)
 
     def compress_latent(
         self,
         token_latent: torch.Tensor,
         future_mask: torch.Tensor,
     ) -> torch.Tensor:
+        if self.backbone_type == "bart":
+            raise ValueError("compress_latent is only used for encoder_only backbones.")
         if self.coarse_slots == self.config.future_len:
             return token_latent
         batch_size = token_latent.size(0)
@@ -214,6 +246,8 @@ class FutureAutoencoder(nn.Module):
         self,
         coarse_latent: torch.Tensor,
     ) -> torch.Tensor:
+        if self.backbone_type == "bart":
+            return coarse_latent
         if self.coarse_slots == self.config.future_len:
             return coarse_latent
         batch_size = coarse_latent.size(0)
@@ -230,6 +264,7 @@ class FutureAutoencoder(nn.Module):
         self,
         latent: torch.Tensor,
         future_mask: torch.Tensor,
+        target_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -242,7 +277,7 @@ class FutureAutoencoder(nn.Module):
             latent = self.expand_latent(latent)
 
         if self.backbone_type == "bart":
-            return self.decode_latent_with_bart(latent=latent, future_mask=future_mask)
+            return self.decode_latent_with_bart(latent=latent, future_mask=future_mask, target_ids=target_ids)
 
         batch_size, seq_len, _ = latent.shape
         hidden_states = self.latent_to_hidden(latent)
@@ -260,22 +295,60 @@ class FutureAutoencoder(nn.Module):
         self,
         latent: torch.Tensor,
         future_mask: torch.Tensor,
+        target_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        batch_size, seq_len, _ = latent.shape
-        encoder_hidden_states = self.latent_to_hidden(latent)
-        decoder_inputs_embeds = self.decoder_queries.unsqueeze(0).expand(batch_size, seq_len, -1)
-        decoder_attention_mask = future_mask
-        decoder_outputs = self.seq2seq_backbone.model.decoder(
-            input_ids=None,
-            attention_mask=decoder_attention_mask,
-            encoder_hidden_states=encoder_hidden_states,
-            encoder_attention_mask=future_mask,
-            inputs_embeds=decoder_inputs_embeds,
-            return_dict=True,
+        encoder_hidden_states = self.perceiver_ae.decode(latent)
+        encoder_mask = torch.ones(
+            encoder_hidden_states.size(0),
+            encoder_hidden_states.size(1),
+            device=encoder_hidden_states.device,
+            dtype=future_mask.dtype,
         )
-        logits = self.seq2seq_backbone.lm_head(decoder_outputs.last_hidden_state)
-        logits = logits + self.seq2seq_backbone.final_logits_bias
-        return logits
+        encoder_outputs = BaseModelOutput(last_hidden_state=encoder_hidden_states)
+
+        if target_ids is not None:
+            outputs = self.seq2seq_backbone(
+                encoder_outputs=encoder_outputs,
+                attention_mask=encoder_mask,
+                labels=target_ids,
+                return_dict=True,
+            )
+            return outputs.logits
+
+        generated_ids = self.seq2seq_backbone.generate(
+            encoder_outputs=encoder_outputs,
+            attention_mask=encoder_mask,
+            max_length=self.config.future_len + 1,
+            min_length=self.config.future_len + 1,
+            num_beams=1,
+        )
+        generated_ids = generated_ids[:, 1 : self.config.future_len + 1]
+        vocab_size = self.seq2seq_backbone.config.vocab_size
+        logits = F.one_hot(generated_ids, num_classes=vocab_size).float()
+        return logits * 100.0
+
+    def generate_from_latent(
+        self,
+        latent: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.backbone_type != "bart":
+            raise ValueError("generate_from_latent is only supported for the bart backbone.")
+        encoder_hidden_states = self.perceiver_ae.decode(latent)
+        encoder_mask = torch.ones(
+            encoder_hidden_states.size(0),
+            encoder_hidden_states.size(1),
+            device=encoder_hidden_states.device,
+            dtype=torch.long,
+        )
+        encoder_outputs = BaseModelOutput(last_hidden_state=encoder_hidden_states)
+        generated_ids = self.seq2seq_backbone.generate(
+            encoder_outputs=encoder_outputs,
+            attention_mask=encoder_mask,
+            max_length=self.config.future_len + 1,
+            min_length=self.config.future_len + 1,
+            num_beams=1,
+        )
+        return generated_ids[:, 1 : self.config.future_len + 1]
 
     def forward(
         self,
@@ -283,5 +356,5 @@ class FutureAutoencoder(nn.Module):
         future_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         latent = self.encode_future(future_ids=future_ids, future_mask=future_mask)
-        logits = self.decode_latent(latent=latent, future_mask=future_mask)
+        logits = self.decode_latent(latent=latent, future_mask=future_mask, target_ids=future_ids)
         return latent, logits

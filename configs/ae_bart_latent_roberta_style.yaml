@@ -16,6 +16,9 @@ model:
   future_len: 16
   coarse_slots: 8
   latent_dim: 512
+  decoder_latents: 16
+  latent_bottleneck_depth: 2
+  l2_normalize_latents: true
   slot_refinement: none
   freeze_backbone: true
   decoder_layers: 2
