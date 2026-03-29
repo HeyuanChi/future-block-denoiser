@@ -14,6 +14,7 @@ class LatentDenoiserConfig:
     prefix_len: int = 64
     future_len: int = 16
     coarse_slots: int | None = None
+    use_initializer: bool = False
     num_diffusion_steps: int = 100
     denoiser_layers: int = 4
     denoiser_heads: int = 8
@@ -51,6 +52,11 @@ class LatentDenoiser(nn.Module):
         self.position_embedding = nn.Embedding(config.prefix_len + self.latent_len, config.latent_dim)
         self.segment_embedding = nn.Embedding(2, config.latent_dim)
         self.input_layer_norm = nn.LayerNorm(config.latent_dim)
+        if config.use_initializer:
+            self.initializer_queries = nn.Parameter(torch.randn(self.latent_len, config.latent_dim) * 0.02)
+            self.initializer_position_embedding = nn.Embedding(config.prefix_len + self.latent_len, config.latent_dim)
+            self.initializer_segment_embedding = nn.Embedding(2, config.latent_dim)
+            self.initializer_layer_norm = nn.LayerNorm(config.latent_dim)
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=config.latent_dim,
@@ -66,6 +72,41 @@ class LatentDenoiser(nn.Module):
             num_layers=config.denoiser_layers,
         )
         self.output_projection = nn.Linear(config.latent_dim, config.latent_dim)
+
+    def initialize_latent(
+        self,
+        prefix_states: torch.Tensor,
+        prefix_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        if not self.config.use_initializer:
+            raise ValueError("initialize_latent requires use_initializer=True.")
+
+        batch_size, prefix_len, _ = prefix_states.shape
+        init_queries = self.initializer_queries.unsqueeze(0).expand(batch_size, -1, -1)
+        latent_len = init_queries.size(1)
+        token_states = torch.cat([prefix_states, init_queries], dim=1)
+
+        position_ids = torch.arange(prefix_len + latent_len, device=prefix_states.device).unsqueeze(0).expand(
+            batch_size,
+            prefix_len + latent_len,
+        )
+        segment_ids = torch.cat(
+            [
+                torch.zeros(batch_size, prefix_len, device=prefix_states.device, dtype=torch.long),
+                torch.ones(batch_size, latent_len, device=prefix_states.device, dtype=torch.long),
+            ],
+            dim=1,
+        )
+
+        token_states = token_states + self.initializer_position_embedding(position_ids)
+        token_states = token_states + self.initializer_segment_embedding(segment_ids)
+        token_states = self.initializer_layer_norm(token_states)
+
+        latent_mask = torch.ones(batch_size, latent_len, device=prefix_states.device, dtype=prefix_mask.dtype)
+        padding_mask = torch.cat([prefix_mask, latent_mask], dim=1) == 0
+        token_states = self.transformer(token_states, src_key_padding_mask=padding_mask)
+        latent_states = token_states[:, prefix_len:, :]
+        return self.output_projection(latent_states)
 
     def forward(
         self,

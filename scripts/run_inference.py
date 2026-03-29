@@ -58,7 +58,13 @@ def iterative_refine_latent(
     batch_size = prefix_states.size(0)
     latent_len = denoiser.latent_len
     latent_dim = denoiser.config.latent_dim
-    latent = torch.randn(batch_size, latent_len, latent_dim, device=prefix_states.device)
+    if denoiser.config.use_initializer:
+        latent = denoiser.initialize_latent(
+            prefix_states=prefix_states,
+            prefix_mask=prefix_mask,
+        )
+    else:
+        latent = torch.randn(batch_size, latent_len, latent_dim, device=prefix_states.device)
     latent_mask = torch.ones(batch_size, latent_len, device=prefix_states.device, dtype=prefix_mask.dtype)
 
     for timestep in reversed(range(num_steps)):
