@@ -47,6 +47,7 @@ def iterative_refine_latent(
     context_states: torch.Tensor,
     context_mask: torch.Tensor,
     num_steps: int,
+    start_latent: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     Runs a deterministic reverse diffusion loop from Gaussian noise.
@@ -54,7 +55,10 @@ def iterative_refine_latent(
     batch_size = context_states.size(0)
     latent_len = denoiser.latent_len
     latent_dim = denoiser.config.latent_dim
-    latent = torch.randn(batch_size, latent_len, latent_dim, device=context_states.device)
+    if start_latent is None:
+        latent = torch.randn(batch_size, latent_len, latent_dim, device=context_states.device)
+    else:
+        latent = start_latent.clone()
     latent_mask = torch.ones(batch_size, latent_len, device=context_states.device, dtype=context_mask.dtype)
     self_condition_latent = None
 
@@ -90,6 +94,18 @@ def parse_num_steps_list(num_steps_text: str) -> list[int]:
     return values
 
 
+def parse_timestep_list(timestep_text: str) -> list[int]:
+    values = []
+    for chunk in timestep_text.split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        values.append(int(chunk))
+    if not values:
+        raise ValueError("Expected at least one integer in --compare-start-t.")
+    return values
+
+
 def decode_ids(tokenizer, token_ids: torch.Tensor) -> str:
     return tokenizer.decode(token_ids.tolist(), skip_special_tokens=True)
 
@@ -100,6 +116,7 @@ def main() -> None:
     parser.add_argument("--sample-index", type=int, default=0)
     parser.add_argument("--num-steps", type=int, default=None)
     parser.add_argument("--compare-num-steps", type=str, default=None)
+    parser.add_argument("--compare-start-t", type=str, default=None)
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -118,6 +135,10 @@ def main() -> None:
         num_steps_list = parse_num_steps_list(args.compare_num_steps)
     else:
         num_steps_list = [num_steps]
+    if args.compare_start_t is not None:
+        start_t_list = parse_timestep_list(args.compare_start_t)
+    else:
+        start_t_list = []
     noise_schedule = DiffusionNoiseSchedule(
         num_steps=denoiser_config.num_diffusion_steps,
         schedule_type=config["model"].get("noise_schedule", "sqrt"),
@@ -211,6 +232,41 @@ def main() -> None:
         print(f"\nDenoised Prediction ({steps} steps):")
         print(denoised_text)
         print(f"Latent MSE to AE target ({steps} steps): {latent_mse:.4f}")
+
+    for start_t in start_t_list:
+        if start_t < 0 or start_t >= denoiser_config.num_diffusion_steps:
+            raise ValueError(
+                f"start timestep {start_t} is out of range for num_diffusion_steps={denoiser_config.num_diffusion_steps}."
+            )
+
+        timestep_tensor = torch.full(
+            (batch["future_ids"].size(0),),
+            start_t,
+            device=device,
+            dtype=torch.long,
+        )
+
+        with torch.no_grad():
+            start_latent, _ = noise_schedule.add_noise(target_latent, timestep_tensor)
+            denoised_latent = iterative_refine_latent(
+                denoiser=denoiser,
+                noise_schedule=noise_schedule,
+                context_states=context_states,
+                context_mask=context_mask,
+                num_steps=start_t + 1,
+                start_latent=start_latent,
+            )
+            denoised_logits = autoencoder.decode_latent(
+                latent=denoised_latent,
+                future_mask=batch["future_mask"],
+            )
+            denoised_prediction_ids = denoised_logits.argmax(dim=-1)
+            latent_mse = torch.mean((denoised_latent - target_latent) ** 2).item()
+
+        denoised_text = decode_ids(tokenizer, denoised_prediction_ids[0].cpu())
+        print(f"\nDenoised Prediction (start from target noise t={start_t}):")
+        print(denoised_text)
+        print(f"Latent MSE to AE target (start t={start_t}): {latent_mse:.4f}")
 
 
 if __name__ == "__main__":
