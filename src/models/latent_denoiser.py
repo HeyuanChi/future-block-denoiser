@@ -13,6 +13,7 @@ class LatentDenoiserConfig:
     latent_dim: int = 256
     prefix_len: int = 64
     future_len: int = 16
+    coarse_slots: int | None = None
     num_diffusion_steps: int = 100
     denoiser_layers: int = 4
     denoiser_heads: int = 8
@@ -44,9 +45,10 @@ class LatentDenoiser(nn.Module):
     def __init__(self, config: LatentDenoiserConfig) -> None:
         super().__init__()
         self.config = config
+        self.latent_len = config.coarse_slots or config.future_len
 
         self.timestep_embedding = nn.Embedding(config.num_diffusion_steps, config.latent_dim)
-        self.position_embedding = nn.Embedding(config.prefix_len + config.future_len, config.latent_dim)
+        self.position_embedding = nn.Embedding(config.prefix_len + self.latent_len, config.latent_dim)
         self.segment_embedding = nn.Embedding(2, config.latent_dim)
         self.input_layer_norm = nn.LayerNorm(config.latent_dim)
 

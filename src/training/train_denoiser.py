@@ -89,6 +89,12 @@ def run_epoch(
                 future_ids=batch["future_ids"],
                 future_mask=batch["future_mask"],
             )
+            latent_mask = torch.ones(
+                clean_latent.size(0),
+                clean_latent.size(1),
+                device=device,
+                dtype=batch["future_mask"].dtype,
+            )
 
         timesteps = noise_schedule.sample_timesteps(batch["future_ids"].size(0))
         noisy_latent, target_noise = noise_schedule.add_noise(clean_latent, timesteps)
@@ -105,10 +111,10 @@ def run_epoch(
             prefix_states=prefix_states,
             timesteps=timesteps,
             prefix_mask=batch["prefix_mask"],
-            future_mask=batch["future_mask"],
+            future_mask=latent_mask,
         )
 
-        loss_mask = batch["future_mask"].unsqueeze(-1).float()
+        loss_mask = latent_mask.unsqueeze(-1).float()
         loss = F.mse_loss(predicted_noise * loss_mask, target_noise * loss_mask, reduction="sum")
         normalizer = (loss_mask.sum() * predicted_noise.size(-1)).clamp_min(1.0)
         loss = loss / normalizer

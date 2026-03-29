@@ -56,9 +56,10 @@ def iterative_refine_latent(
     Runs a deterministic reverse diffusion loop from Gaussian noise.
     """
     batch_size = prefix_states.size(0)
-    future_len = future_mask.size(1)
+    latent_len = denoiser.latent_len
     latent_dim = denoiser.config.latent_dim
-    latent = torch.randn(batch_size, future_len, latent_dim, device=prefix_states.device)
+    latent = torch.randn(batch_size, latent_len, latent_dim, device=prefix_states.device)
+    latent_mask = torch.ones(batch_size, latent_len, device=prefix_states.device, dtype=prefix_mask.dtype)
 
     for timestep in reversed(range(num_steps)):
         timestep_tensor = torch.full((batch_size,), timestep, device=prefix_states.device, dtype=torch.long)
@@ -67,7 +68,7 @@ def iterative_refine_latent(
             prefix_states=prefix_states,
             timesteps=timestep_tensor,
             prefix_mask=prefix_mask,
-            future_mask=future_mask,
+            future_mask=latent_mask,
         )
         latent = noise_schedule.step_ddpm_mean(
             noisy_latent=latent,
@@ -156,7 +157,12 @@ def main() -> None:
             prefix_states=prefix_states,
             timesteps=oracle_timestep,
             prefix_mask=batch["prefix_mask"],
-            future_mask=batch["future_mask"],
+            future_mask=torch.ones(
+                target_latent.size(0),
+                target_latent.size(1),
+                device=device,
+                dtype=batch["future_mask"].dtype,
+            ),
         )
         oracle_latent = noise_schedule.predict_clean_from_noise(
             noisy_latent=oracle_noisy_latent,
