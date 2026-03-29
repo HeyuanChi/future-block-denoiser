@@ -18,6 +18,9 @@ model:
   prefix_len: 64
   future_len: 16
   coarse_slots: 4
+  slot_refinement: causal_residual
+  slot_refinement_layers: 1
+  slot_refinement_scale: 0.25
   num_diffusion_steps: 50
   noise_schedule: sqrt
   timestep_sampling: loss_aware
