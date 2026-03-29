@@ -13,6 +13,9 @@ class FutureLatentPredictorConfig:
     latent_dim: int = 256
     prefix_len: int = 64
     coarse_slots: int = 4
+    slot_refinement: str = "none"
+    slot_refinement_layers: int = 1
+    slot_refinement_scale: float = 0.25
     predictor_layers: int = 2
     predictor_heads: int = 8
     predictor_ffn_dim: int = 1024
@@ -40,6 +43,7 @@ class FutureLatentPredictor(nn.Module):
     def __init__(self, config: FutureLatentPredictorConfig) -> None:
         super().__init__()
         self.config = config
+        self.slot_refinement = config.slot_refinement
 
         self.coarse_queries = nn.Parameter(torch.randn(config.coarse_slots, config.latent_dim) * 0.02)
         self.position_embedding = nn.Embedding(config.prefix_len + config.coarse_slots, config.latent_dim)
@@ -60,6 +64,26 @@ class FutureLatentPredictor(nn.Module):
             num_layers=config.predictor_layers,
         )
         self.output_projection = nn.Linear(config.latent_dim, config.latent_dim)
+        if self.slot_refinement == "causal_residual":
+            self.slot_position_embeddings = nn.Embedding(config.coarse_slots, config.latent_dim)
+            slot_encoder_layer = nn.TransformerEncoderLayer(
+                d_model=config.latent_dim,
+                nhead=config.predictor_heads,
+                dim_feedforward=config.predictor_ffn_dim,
+                dropout=config.predictor_dropout,
+                activation="gelu",
+                batch_first=True,
+                norm_first=True,
+            )
+            self.slot_refiner = nn.TransformerEncoder(
+                encoder_layer=slot_encoder_layer,
+                num_layers=config.slot_refinement_layers,
+            )
+        elif self.slot_refinement != "none":
+            raise ValueError(
+                f"Unsupported slot_refinement={config.slot_refinement!r}. "
+                "Expected 'none' or 'causal_residual'."
+            )
 
     def forward(
         self,
@@ -90,4 +114,25 @@ class FutureLatentPredictor(nn.Module):
         token_states = self.transformer(token_states, src_key_padding_mask=padding_mask)
 
         coarse_states = token_states[:, prefix_len:, :]
-        return self.output_projection(coarse_states)
+        coarse_states = self.output_projection(coarse_states)
+        return self.refine_slots(coarse_states)
+
+    def refine_slots(
+        self,
+        coarse_states: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.slot_refinement == "none":
+            return coarse_states
+
+        batch_size = coarse_states.size(0)
+        slot_position_ids = torch.arange(self.config.coarse_slots, device=coarse_states.device).unsqueeze(0).expand(
+            batch_size,
+            self.config.coarse_slots,
+        )
+        slot_inputs = coarse_states + self.slot_position_embeddings(slot_position_ids)
+        causal_mask = torch.triu(
+            torch.full((self.config.coarse_slots, self.config.coarse_slots), float("-inf"), device=coarse_states.device),
+            diagonal=1,
+        )
+        refined_slots = self.slot_refiner(slot_inputs, mask=causal_mask)
+        return coarse_states + self.config.slot_refinement_scale * refined_slots
