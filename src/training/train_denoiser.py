@@ -20,7 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.data.dataset import DataConfig, build_dataloaders
 from src.models.future_autoencoder import FutureAutoencoder, FutureAutoencoderConfig
 from src.models.latent_denoiser import LatentDenoiser, LatentDenoiserConfig
-from src.models.prefix_encoder import PrefixEncoder, PrefixEncoderConfig
+from src.models.context_encoder import ContextEncoder, ContextEncoderConfig
 from src.training.train_ae import load_config, move_batch_to_device, resolve_device
 from src.utils.noise_schedule import DiffusionNoiseSchedule
 
@@ -65,7 +65,7 @@ def load_autoencoder(
 
 def run_epoch(
     autoencoder: FutureAutoencoder,
-    prefix_encoder: PrefixEncoder,
+    context_encoder: ContextEncoder,
     denoiser: LatentDenoiser,
     dataloader: torch.utils.data.DataLoader,
     noise_schedule: DiffusionNoiseSchedule,
@@ -74,7 +74,7 @@ def run_epoch(
     log_every: int,
 ) -> float:
     is_train = optimizer is not None
-    prefix_encoder.train(is_train)
+    context_encoder.train(is_train)
     denoiser.train(is_train)
 
     total_loss = 0.0
@@ -102,15 +102,16 @@ def run_epoch(
         if is_train:
             optimizer.zero_grad()
 
-        prefix_states = prefix_encoder(
-            prefix_ids=batch["prefix_ids"],
-            prefix_mask=batch["prefix_mask"],
+        context_ids, context_mask = build_context_inputs(batch)
+        context_states = context_encoder(
+            context_ids=context_ids,
+            context_mask=context_mask,
         )
         predicted_noise = denoiser(
             noisy_latent=noisy_latent,
-            prefix_states=prefix_states,
+            prefix_states=context_states,
             timesteps=timesteps,
-            prefix_mask=batch["prefix_mask"],
+            prefix_mask=context_mask,
             future_mask=latent_mask,
         )
 
@@ -132,8 +133,18 @@ def run_epoch(
     return total_loss / max(total_batches, 1)
 
 
+def build_context_inputs(
+    batch: dict[str, torch.Tensor],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if "suffix_ids" not in batch:
+        return batch["prefix_ids"], batch["prefix_mask"]
+    context_ids = torch.cat([batch["prefix_ids"], batch["suffix_ids"]], dim=1)
+    context_mask = torch.cat([batch["prefix_mask"], batch["suffix_mask"]], dim=1)
+    return context_ids, context_mask
+
+
 def save_checkpoint(
-    prefix_encoder: PrefixEncoder,
+    context_encoder: ContextEncoder,
     denoiser: LatentDenoiser,
     optimizer: torch.optim.Optimizer,
     epoch: int,
@@ -145,7 +156,7 @@ def save_checkpoint(
     torch.save(
         {
             "epoch": epoch,
-            "prefix_encoder_state_dict": prefix_encoder.state_dict(),
+            "context_encoder_state_dict": context_encoder.state_dict(),
             "denoiser_state_dict": denoiser.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "train_loss": train_loss,
@@ -175,13 +186,15 @@ def append_epoch_log(
 
 def load_denoiser_checkpoint(
     checkpoint_path: str,
-    prefix_encoder: PrefixEncoder,
+    context_encoder: ContextEncoder,
     denoiser: LatentDenoiser,
     optimizer: torch.optim.Optimizer | None,
     device: torch.device,
 ) -> tuple[int, float, bool]:
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    prefix_encoder.load_state_dict(checkpoint["prefix_encoder_state_dict"])
+    context_encoder.load_state_dict(
+        checkpoint.get("context_encoder_state_dict", checkpoint["prefix_encoder_state_dict"])
+    )
     denoiser.load_state_dict(checkpoint["denoiser_state_dict"])
 
     optimizer_loaded = False
@@ -204,7 +217,7 @@ def main() -> None:
 
     config = load_config(args.config)
     data_config = DataConfig.from_dict(config)
-    prefix_config = PrefixEncoderConfig.from_dict(config)
+    context_config = ContextEncoderConfig.from_dict(config)
     denoiser_config = LatentDenoiserConfig.from_dict(config)
     train_config = DenoiserTrainConfig.from_dict(config)
 
@@ -217,9 +230,9 @@ def main() -> None:
         checkpoint_path=train_config.ae_checkpoint_path,
         device=device,
     )
-    prefix_encoder = PrefixEncoder(prefix_config)
-    prefix_encoder.freeze_bert_backbone()
-    prefix_encoder.to(device)
+    context_encoder = ContextEncoder(context_config)
+    context_encoder.freeze_bert_backbone()
+    context_encoder.to(device)
 
     denoiser = LatentDenoiser(denoiser_config).to(device)
     noise_schedule = DiffusionNoiseSchedule(
@@ -229,7 +242,7 @@ def main() -> None:
 
     trainable_parameters = [
         parameter
-        for parameter in list(prefix_encoder.parameters()) + list(denoiser.parameters())
+        for parameter in list(context_encoder.parameters()) + list(denoiser.parameters())
         if parameter.requires_grad
     ]
     optimizer = torch.optim.AdamW(
@@ -247,7 +260,7 @@ def main() -> None:
     if train_config.resume_from_checkpoint is not None:
         start_epoch, best_val_loss, optimizer_loaded = load_denoiser_checkpoint(
             checkpoint_path=train_config.resume_from_checkpoint,
-            prefix_encoder=prefix_encoder,
+            context_encoder=context_encoder,
             denoiser=denoiser,
             optimizer=optimizer,
             device=device,
@@ -261,7 +274,7 @@ def main() -> None:
         print(f"Epoch {epoch}/{train_config.num_epochs}")
         train_loss = run_epoch(
             autoencoder=autoencoder,
-            prefix_encoder=prefix_encoder,
+            context_encoder=context_encoder,
             denoiser=denoiser,
             dataloader=train_loader,
             noise_schedule=noise_schedule,
@@ -273,7 +286,7 @@ def main() -> None:
         with torch.no_grad():
             val_loss = run_epoch(
                 autoencoder=autoencoder,
-                prefix_encoder=prefix_encoder,
+                context_encoder=context_encoder,
                 denoiser=denoiser,
                 dataloader=val_loader,
                 noise_schedule=noise_schedule,
@@ -306,7 +319,7 @@ def main() -> None:
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             save_checkpoint(
-                prefix_encoder=prefix_encoder,
+                context_encoder=context_encoder,
                 denoiser=denoiser,
                 optimizer=optimizer,
                 epoch=epoch,

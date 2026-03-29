@@ -13,9 +13,9 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.data.dataset import DataConfig, build_dataloaders
 from src.models.future_autoencoder import FutureAutoencoderConfig
 from src.models.latent_denoiser import LatentDenoiser, LatentDenoiserConfig
-from src.models.prefix_encoder import PrefixEncoder, PrefixEncoderConfig
+from src.models.context_encoder import ContextEncoder, ContextEncoderConfig
 from src.training.train_ae import load_config, move_batch_to_device, resolve_device
-from src.training.train_denoiser import load_autoencoder
+from src.training.train_denoiser import build_context_inputs, load_autoencoder
 from src.utils.noise_schedule import DiffusionNoiseSchedule
 
 
@@ -29,19 +29,21 @@ def load_denoiser_components(
         device=device,
     )
 
-    prefix_encoder = PrefixEncoder(PrefixEncoderConfig.from_dict(config)).to(device)
+    context_encoder = ContextEncoder(ContextEncoderConfig.from_dict(config)).to(device)
     denoiser = LatentDenoiser(LatentDenoiserConfig.from_dict(config)).to(device)
 
     checkpoint = torch.load(
         config["training"]["denoiser_checkpoint_path"],
         map_location=device,
     )
-    prefix_encoder.load_state_dict(checkpoint["prefix_encoder_state_dict"])
+    context_encoder.load_state_dict(
+        checkpoint.get("context_encoder_state_dict", checkpoint["prefix_encoder_state_dict"])
+    )
     denoiser.load_state_dict(checkpoint["denoiser_state_dict"])
 
-    prefix_encoder.eval()
+    context_encoder.eval()
     denoiser.eval()
-    return autoencoder, prefix_encoder, denoiser
+    return autoencoder, context_encoder, denoiser
 
 
 def iterative_refine_latent(
@@ -106,7 +108,7 @@ def main() -> None:
     print(f"Using device: {device}")
 
     tokenizer, _, val_loader = build_dataloaders(data_config)
-    autoencoder, prefix_encoder, denoiser = load_denoiser_components(config, device)
+    autoencoder, context_encoder, denoiser = load_denoiser_components(config, device)
 
     denoiser_config = LatentDenoiserConfig.from_dict(config)
     num_steps = args.num_steps or denoiser_config.num_diffusion_steps
@@ -133,15 +135,16 @@ def main() -> None:
         )
         ae_prediction_ids = ae_logits.argmax(dim=-1)
 
-        prefix_states = prefix_encoder(
-            prefix_ids=batch["prefix_ids"],
-            prefix_mask=batch["prefix_mask"],
+        context_ids, context_mask = build_context_inputs(batch)
+        context_states = context_encoder(
+            context_ids=context_ids,
+            context_mask=context_mask,
         )
         denoised_latent = iterative_refine_latent(
             denoiser=denoiser,
             noise_schedule=noise_schedule,
-            prefix_states=prefix_states,
-            prefix_mask=batch["prefix_mask"],
+            prefix_states=context_states,
+            prefix_mask=context_mask,
             future_mask=batch["future_mask"],
             num_steps=num_steps,
         )
@@ -160,9 +163,9 @@ def main() -> None:
         oracle_noisy_latent, _ = noise_schedule.add_noise(target_latent, oracle_timestep)
         oracle_predicted_noise = denoiser(
             noisy_latent=oracle_noisy_latent,
-            prefix_states=prefix_states,
+            prefix_states=context_states,
             timesteps=oracle_timestep,
-            prefix_mask=batch["prefix_mask"],
+            prefix_mask=context_mask,
             future_mask=torch.ones(
                 target_latent.size(0),
                 target_latent.size(1),

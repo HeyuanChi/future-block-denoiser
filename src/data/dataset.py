@@ -14,8 +14,10 @@ class DataConfig:
     dataset_name: str = "Salesforce/wikitext"
     dataset_config: str = "wikitext-2-raw-v1"
     tokenizer_name: str = "bert-base-uncased"
+    task_mode: str = "future"
     prefix_len: int = 64
     future_len: int = 16
+    suffix_len: int = 0
     stride: int = 16
     batch_size: int = 8
     num_workers: int = 0
@@ -29,7 +31,7 @@ class DataConfig:
 
     @property
     def total_len(self) -> int:
-        return self.prefix_len + self.future_len
+        return self.prefix_len + self.future_len + self.suffix_len
 
 
 class PrefixFutureDataset(Dataset[dict[str, torch.Tensor]]):
@@ -40,12 +42,16 @@ class PrefixFutureDataset(Dataset[dict[str, torch.Tensor]]):
         token_ids: list[int],
         prefix_len: int,
         future_len: int,
+        suffix_len: int,
+        task_mode: str,
         stride: int,
         max_samples: int | None = None,
     ) -> None:
+        self.task_mode = task_mode
         self.prefix_len = prefix_len
         self.future_len = future_len
-        self.total_len = prefix_len + future_len
+        self.suffix_len = suffix_len
+        self.total_len = prefix_len + future_len + suffix_len
         self.samples = self._build_samples(
             token_ids=token_ids,
             stride=stride,
@@ -67,16 +73,20 @@ class PrefixFutureDataset(Dataset[dict[str, torch.Tensor]]):
         for start in range(0, max_start, stride):
             window = token_ids[start : start + self.total_len]
             prefix_ids = torch.tensor(window[: self.prefix_len], dtype=torch.long)
-            future_ids = torch.tensor(window[self.prefix_len :], dtype=torch.long)
+            future_ids = torch.tensor(window[self.prefix_len : self.prefix_len + self.future_len], dtype=torch.long)
 
-            samples.append(
-                {
-                    "prefix_ids": prefix_ids,
-                    "future_ids": future_ids,
-                    "prefix_mask": torch.ones(self.prefix_len, dtype=torch.long),
-                    "future_mask": torch.ones(self.future_len, dtype=torch.long),
-                }
-            )
+            sample = {
+                "prefix_ids": prefix_ids,
+                "future_ids": future_ids,
+                "prefix_mask": torch.ones(self.prefix_len, dtype=torch.long),
+                "future_mask": torch.ones(self.future_len, dtype=torch.long),
+            }
+            if self.task_mode == "infilling":
+                suffix_ids = torch.tensor(window[self.prefix_len + self.future_len :], dtype=torch.long)
+                sample["suffix_ids"] = suffix_ids
+                sample["suffix_mask"] = torch.ones(self.suffix_len, dtype=torch.long)
+
+            samples.append(sample)
 
             if max_samples is not None and len(samples) >= max_samples:
                 break
@@ -129,6 +139,8 @@ def build_dataset(
         token_ids=token_ids,
         prefix_len=config.prefix_len,
         future_len=config.future_len,
+        suffix_len=config.suffix_len,
+        task_mode=config.task_mode,
         stride=config.stride,
         max_samples=max_samples,
     )
