@@ -210,6 +210,3 @@ __marimo__/
 # Project outputs
 outputs/
 notes/
-report/*
-!report/
-!report/report.pdf
