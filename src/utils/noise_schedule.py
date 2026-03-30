@@ -102,6 +102,33 @@ class DiffusionNoiseSchedule:
         alpha_bar = self.alpha_bars[timesteps].view(-1, 1, 1)
         return (noisy_latent - torch.sqrt(alpha_bar) * predicted_clean) / torch.sqrt(1.0 - alpha_bar)
 
+    def compute_v_target(
+        self,
+        clean_latent: torch.Tensor,
+        noise: torch.Tensor,
+        timesteps: torch.Tensor,
+    ) -> torch.Tensor:
+        alpha_bar = self.alpha_bars[timesteps].view(-1, 1, 1)
+        return torch.sqrt(alpha_bar) * noise - torch.sqrt(1.0 - alpha_bar) * clean_latent
+
+    def predict_clean_from_v(
+        self,
+        noisy_latent: torch.Tensor,
+        predicted_v: torch.Tensor,
+        timesteps: torch.Tensor,
+    ) -> torch.Tensor:
+        alpha_bar = self.alpha_bars[timesteps].view(-1, 1, 1)
+        return torch.sqrt(alpha_bar) * noisy_latent - torch.sqrt(1.0 - alpha_bar) * predicted_v
+
+    def predict_noise_from_v(
+        self,
+        noisy_latent: torch.Tensor,
+        predicted_v: torch.Tensor,
+        timesteps: torch.Tensor,
+    ) -> torch.Tensor:
+        alpha_bar = self.alpha_bars[timesteps].view(-1, 1, 1)
+        return torch.sqrt(1.0 - alpha_bar) * noisy_latent + torch.sqrt(alpha_bar) * predicted_v
+
     def step_ddpm_mean_from_clean(
         self,
         noisy_latent: torch.Tensor,

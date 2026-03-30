@@ -9,7 +9,6 @@ import sys
 from typing import Any
 
 import torch
-import torch.nn.functional as F
 from torch.optim.lr_scheduler import LambdaLR
 from tqdm import tqdm
 
@@ -23,6 +22,32 @@ from src.models.latent_denoiser import LatentDenoiser, LatentDenoiserConfig
 from src.models.context_encoder import ContextEncoder, ContextEncoderConfig
 from src.training.train_ae import load_config, move_batch_to_device, resolve_device
 from src.utils.noise_schedule import DiffusionNoiseSchedule
+
+
+def prediction_to_clean_latent(
+    prediction: torch.Tensor,
+    noisy_latent: torch.Tensor,
+    clean_latent: torch.Tensor,
+    noise: torch.Tensor,
+    timesteps: torch.Tensor,
+    noise_schedule: DiffusionNoiseSchedule,
+    prediction_objective: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if prediction_objective == "pred_x0":
+        return prediction, clean_latent
+    if prediction_objective == "pred_v":
+        predicted_clean = noise_schedule.predict_clean_from_v(
+            noisy_latent=noisy_latent,
+            predicted_v=prediction,
+            timesteps=timesteps,
+        )
+        target = noise_schedule.compute_v_target(
+            clean_latent=clean_latent,
+            noise=noise,
+            timesteps=timesteps,
+        )
+        return predicted_clean, target
+    raise ValueError(f"Unsupported prediction_objective={prediction_objective!r}.")
 
 
 @dataclass
@@ -102,7 +127,7 @@ def run_epoch(
             )
 
         timesteps = noise_schedule.sample_timesteps(batch["future_ids"].size(0))
-        noisy_latent, _ = noise_schedule.add_noise(clean_latent, timesteps)
+        noisy_latent, noise = noise_schedule.add_noise(clean_latent, timesteps)
 
         if is_train:
             optimizer.zero_grad()
@@ -118,15 +143,24 @@ def run_epoch(
         self_condition_latent = None
         if denoiser.config.self_conditioning and torch.rand(()) < 0.5:
             with torch.no_grad():
-                self_condition_latent = denoiser(
+                self_condition_prediction = denoiser(
                     noisy_latent=noisy_latent,
                     context_states=context_states,
                     context_mask=context_mask,
                     timesteps=timesteps,
                     future_mask=latent_mask,
                 ).detach()
+                self_condition_latent, _ = prediction_to_clean_latent(
+                    prediction=self_condition_prediction,
+                    noisy_latent=noisy_latent,
+                    clean_latent=clean_latent,
+                    noise=noise,
+                    timesteps=timesteps,
+                    noise_schedule=noise_schedule,
+                    prediction_objective=denoiser.config.prediction_objective,
+                )
 
-        predicted_clean = denoiser(
+        prediction = denoiser(
             noisy_latent=noisy_latent,
             context_states=context_states,
             context_mask=context_mask,
@@ -134,10 +168,21 @@ def run_epoch(
             future_mask=latent_mask,
             self_condition_latent=self_condition_latent,
         )
+        _, target = prediction_to_clean_latent(
+            prediction=prediction,
+            noisy_latent=noisy_latent,
+            clean_latent=clean_latent,
+            noise=noise,
+            timesteps=timesteps,
+            noise_schedule=noise_schedule,
+            prediction_objective=denoiser.config.prediction_objective,
+        )
 
         loss_mask = latent_mask.unsqueeze(-1).float()
-        squared_error = ((predicted_clean - clean_latent) * loss_mask) ** 2
-        per_example_loss = squared_error.sum(dim=(1, 2)) / (loss_mask.sum(dim=(1, 2)) * predicted_clean.size(-1)).clamp_min(1.0)
+        squared_error = ((prediction - target) * loss_mask) ** 2
+        per_example_loss = squared_error.sum(dim=(1, 2)) / (loss_mask.sum(dim=(1, 2)) * prediction.size(-1)).clamp_min(
+            1.0
+        )
         loss = per_example_loss.mean()
         if is_train:
             noise_schedule.update_with_losses(timesteps=timesteps, losses=per_example_loss)
@@ -185,6 +230,7 @@ def save_checkpoint(
     torch.save(
         {
             "epoch": epoch,
+            "prediction_objective": denoiser.config.prediction_objective,
             "context_encoder_state_dict": context_encoder.state_dict(),
             "denoiser_state_dict": denoiser.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),

@@ -15,6 +15,7 @@ class LatentDenoiserConfig:
     future_len: int = 16
     coarse_slots: int | None = None
     num_diffusion_steps: int = 100
+    prediction_objective: str = "pred_v"
     self_conditioning: bool = True
     denoiser_layers: int = 4
     denoiser_heads: int = 8
@@ -31,7 +32,7 @@ class LatentDenoiserConfig:
 
 class LatentDenoiser(nn.Module):
     """
-    Predicts clean future latents from noisy future latents and context states.
+    Predicts a diffusion target from noisy future latents and context states.
 
     Inputs:
         noisy_latent: [B, F, D]
@@ -41,7 +42,7 @@ class LatentDenoiser(nn.Module):
         context_mask: [B, P]
         future_mask: [B, F]
     Output:
-        predicted_clean_latent: [B, F, D]
+        predicted_target: [B, F, D]
     """
 
     def __init__(self, config: LatentDenoiserConfig) -> None:

@@ -33,6 +33,9 @@ def load_denoiser_components(
 
     checkpoint_path = Path(config["training"]["checkpoint_dir"]) / "denoiser_best.pt"
     checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint_objective = checkpoint.get("prediction_objective")
+    if checkpoint_objective is not None:
+        denoiser.config.prediction_objective = checkpoint_objective
     context_encoder.load_state_dict(checkpoint["context_encoder_state_dict"])
     denoiser.load_state_dict(checkpoint["denoiser_state_dict"])
 
@@ -70,7 +73,7 @@ def iterative_refine_latent(
 
     for timestep in timestep_values:
         timestep_tensor = torch.full((batch_size,), timestep, device=context_states.device, dtype=torch.long)
-        predicted_clean = denoiser(
+        prediction = denoiser(
             noisy_latent=latent,
             context_states=context_states,
             context_mask=context_mask,
@@ -78,6 +81,16 @@ def iterative_refine_latent(
             future_mask=latent_mask,
             self_condition_latent=self_condition_latent,
         )
+        if denoiser.config.prediction_objective == "pred_v":
+            predicted_clean = noise_schedule.predict_clean_from_v(
+                noisy_latent=latent,
+                predicted_v=prediction,
+                timesteps=timestep_tensor,
+            )
+        elif denoiser.config.prediction_objective == "pred_x0":
+            predicted_clean = prediction
+        else:
+            raise ValueError(f"Unsupported prediction_objective={denoiser.config.prediction_objective!r}.")
         latent = noise_schedule.step_ddpm_mean_from_clean(
             noisy_latent=latent,
             predicted_clean=predicted_clean,
@@ -205,7 +218,7 @@ def main() -> None:
             dtype=torch.long,
         )
         oracle_noisy_latent, _ = noise_schedule.add_noise(target_latent, oracle_timestep)
-        oracle_latent = denoiser(
+        oracle_prediction = denoiser(
             noisy_latent=oracle_noisy_latent,
             context_states=context_states,
             context_mask=context_mask,
@@ -218,6 +231,16 @@ def main() -> None:
             ),
             self_condition_latent=None,
         )
+        if denoiser.config.prediction_objective == "pred_v":
+            oracle_latent = noise_schedule.predict_clean_from_v(
+                noisy_latent=oracle_noisy_latent,
+                predicted_v=oracle_prediction,
+                timesteps=oracle_timestep,
+            )
+        elif denoiser.config.prediction_objective == "pred_x0":
+            oracle_latent = oracle_prediction
+        else:
+            raise ValueError(f"Unsupported prediction_objective={denoiser.config.prediction_objective!r}.")
         oracle_logits = autoencoder.decode_latent(
             latent=oracle_latent,
             future_mask=batch["future_mask"],

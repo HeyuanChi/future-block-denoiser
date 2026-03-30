@@ -27,6 +27,7 @@ model:
   freeze_backbone: true
   slot_refinement: none
   num_diffusion_steps: 50
+  prediction_objective: pred_v
   noise_schedule: sqrt
   timestep_sampling: loss_aware
   self_conditioning: true
