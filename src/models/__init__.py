@@ -1,1 +1,1 @@
-"""Model definitions for future block denoiser."""
+"""Model definitions for the current latent diffusion pipeline."""

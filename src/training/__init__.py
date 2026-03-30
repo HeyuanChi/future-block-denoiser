@@ -1,1 +1,1 @@
-"""Training scripts for future block denoiser."""
+"""Training entry points."""

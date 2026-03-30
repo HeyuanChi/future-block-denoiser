@@ -36,15 +36,7 @@ class ContextEncoderConfig:
 
 
 class ContextEncoder(nn.Module):
-    """
-    Encodes a concatenated context sequence into conditioning states.
-
-    Input:
-        context_ids: [B, C]
-        context_mask: [B, C]
-    Output:
-        context_states: [B, C, latent_dim]
-    """
+    """Encode the source sequence into conditioning states."""
 
     def __init__(self, config: ContextEncoderConfig) -> None:
         super().__init__()

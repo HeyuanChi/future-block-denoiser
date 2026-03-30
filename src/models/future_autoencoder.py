@@ -277,16 +277,7 @@ class FutureAutoencoderConfig:
 
 
 class FutureAutoencoder(nn.Module):
-    """
-    Stage 1 future-block autoencoder.
-
-    Input:
-        future_ids: [B, 16]
-        future_mask: [B, 16]
-    Output:
-        latent: [B, coarse_slots, 256]
-        logits: [B, 16, vocab_size]
-    """
+    """Autoencoder for target text blocks."""
 
     def __init__(self, config: FutureAutoencoderConfig) -> None:
         super().__init__()
@@ -407,13 +398,6 @@ class FutureAutoencoder(nn.Module):
         future_ids: torch.Tensor,
         future_mask: torch.Tensor,
     ) -> torch.Tensor:
-        """
-        Args:
-            future_ids: [B, S]
-            future_mask: [B, S]
-        Returns:
-            latent: [B, coarse_slots, latent_dim]
-        """
         if self.backbone_type == "encoder_only":
             encoder_outputs = self.future_encoder(
                 input_ids=future_ids,
@@ -496,13 +480,6 @@ class FutureAutoencoder(nn.Module):
         future_mask: torch.Tensor,
         target_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """
-        Args:
-            latent: [B, S, latent_dim]
-            future_mask: [B, S]
-        Returns:
-            logits: [B, S, vocab_size]
-        """
         if latent.size(1) != self.config.future_len:
             latent = self.expand_latent(latent)
 

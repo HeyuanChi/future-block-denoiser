@@ -178,8 +178,7 @@ class Seq2SeqDataset(Dataset[dict[str, torch.Tensor]]):
 
 def build_tokenizer(tokenizer_name: str) -> PreTrainedTokenizerBase:
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
-    # We tokenize a very long concatenated corpus and then slice fixed windows ourselves.
-    # Setting a large max length avoids irrelevant warnings from the tokenizer.
+    # Future-mode data is sliced from one long token stream.
     tokenizer.model_max_length = 10**9
     return tokenizer
 

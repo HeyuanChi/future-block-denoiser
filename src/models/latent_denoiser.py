@@ -31,19 +31,7 @@ class LatentDenoiserConfig:
 
 
 class LatentDenoiser(nn.Module):
-    """
-    Predicts a diffusion target from noisy future latents and context states.
-
-    Inputs:
-        noisy_latent: [B, F, D]
-        context_states: [B, P, D]
-        self_condition_latent: [B, F, D] | None
-        timesteps: [B]
-        context_mask: [B, P]
-        future_mask: [B, F]
-    Output:
-        predicted_target: [B, F, D]
-    """
+    """Predict the diffusion target from noisy latents and context states."""
 
     def __init__(self, config: LatentDenoiserConfig) -> None:
         super().__init__()
