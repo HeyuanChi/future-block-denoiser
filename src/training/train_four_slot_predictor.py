@@ -107,6 +107,7 @@ def run_epoch(
         decoded_logits = autoencoder.decode_latent(
             latent=predicted_latent,
             future_mask=batch["future_mask"],
+            target_ids=batch["future_ids"],
         )
         decode_loss = masked_token_cross_entropy(
             logits=decoded_logits,

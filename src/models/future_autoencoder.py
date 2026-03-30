@@ -11,6 +11,7 @@ from transformers import AutoModel
 from transformers import BartForConditionalGeneration
 from transformers.modeling_outputs import BaseModelOutput
 
+from src.models.backbone_utils import trim_encoder_layers
 from src.models.perceiver_bottleneck import PerceiverAutoEncoder
 
 
@@ -60,13 +61,8 @@ class FutureAutoencoder(nn.Module):
 
         if self.backbone_type == "encoder_only":
             self.future_encoder = AutoModel.from_pretrained(config.bert_name)
-            if not hasattr(self.future_encoder, "encoder") or not hasattr(self.future_encoder.encoder, "layer"):
-                raise ValueError(
-                    f"Backbone {config.bert_name} does not expose encoder.layer; "
-                    "only BERT/RoBERTa-style encoder backbones are currently supported."
-                )
-            self.future_encoder.encoder.layer = nn.ModuleList(self.future_encoder.encoder.layer[:2])
-            hidden_size = self.future_encoder.config.hidden_size
+            trim_encoder_layers(self.future_encoder, num_layers=2)
+            hidden_size = getattr(self.future_encoder.config, "hidden_size", self.future_encoder.config.d_model)
             vocab_size = self.future_encoder.config.vocab_size
             self.seq2seq_backbone = None
         elif self.backbone_type == "bart":

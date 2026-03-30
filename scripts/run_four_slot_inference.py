@@ -86,7 +86,10 @@ def main() -> None:
             future_ids=batch["future_ids"],
             future_mask=batch["future_mask"],
         )
-        ae_prediction_ids = ae_logits.argmax(dim=-1)
+        if autoencoder.config.backbone_type == "bart":
+            ae_prediction_ids = autoencoder.generate_from_latent(target_latent)
+        else:
+            ae_prediction_ids = ae_logits.argmax(dim=-1)
 
         prefix_states = prefix_encoder(
             prefix_ids=batch["prefix_ids"],
@@ -96,11 +99,14 @@ def main() -> None:
             prefix_states=prefix_states,
             prefix_mask=batch["prefix_mask"],
         )
-        predicted_logits = autoencoder.decode_latent(
-            latent=predicted_latent,
-            future_mask=batch["future_mask"],
-        )
-        predicted_ids = predicted_logits.argmax(dim=-1)
+        if autoencoder.config.backbone_type == "bart":
+            predicted_ids = autoencoder.generate_from_latent(predicted_latent)
+        else:
+            predicted_logits = autoencoder.decode_latent(
+                latent=predicted_latent,
+                future_mask=batch["future_mask"],
+            )
+            predicted_ids = predicted_logits.argmax(dim=-1)
 
         latent_mse = torch.mean((predicted_latent - target_latent) ** 2).item()
 

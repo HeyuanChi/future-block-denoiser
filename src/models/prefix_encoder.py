@@ -7,6 +7,8 @@ import torch
 from torch import nn
 from transformers import AutoModel
 
+from src.models.backbone_utils import trim_encoder_layers
+
 
 @dataclass
 class PrefixEncoderConfig:
@@ -38,13 +40,8 @@ class PrefixEncoder(nn.Module):
         self.config = config
 
         self.prefix_encoder = AutoModel.from_pretrained(config.bert_name)
-        if not hasattr(self.prefix_encoder, "encoder") or not hasattr(self.prefix_encoder.encoder, "layer"):
-            raise ValueError(
-                f"Backbone {config.bert_name} does not expose encoder.layer; "
-                "only BERT/RoBERTa-style encoder backbones are currently supported."
-            )
-        self.prefix_encoder.encoder.layer = nn.ModuleList(self.prefix_encoder.encoder.layer[:2])
-        hidden_size = self.prefix_encoder.config.hidden_size
+        trim_encoder_layers(self.prefix_encoder, num_layers=2)
+        hidden_size = getattr(self.prefix_encoder.config, "hidden_size", self.prefix_encoder.config.d_model)
         self.output_projection = nn.Linear(hidden_size, config.latent_dim)
 
     def freeze_bert_backbone(self) -> None:
