@@ -11,10 +11,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.data.dataset import DataConfig, build_dataloaders
-from src.models.future_latent_predictor import FutureLatentPredictor, FutureLatentPredictorConfig
 from src.models.latent_denoiser import LatentDenoiser, LatentDenoiserConfig
 from src.models.context_encoder import ContextEncoder, ContextEncoderConfig
-from src.models.prefix_encoder import PrefixEncoder, PrefixEncoderConfig
 from src.training.train_ae import load_config, move_batch_to_device, resolve_device
 from src.training.train_denoiser import build_context_inputs, load_autoencoder
 from src.utils.noise_schedule import DiffusionNoiseSchedule
@@ -41,23 +39,6 @@ def load_denoiser_components(
     context_encoder.eval()
     denoiser.eval()
     return autoencoder, context_encoder, denoiser
-
-
-def load_predictor_components(
-    predictor_config: dict,
-    device: torch.device,
-) -> tuple[PrefixEncoder, FutureLatentPredictor]:
-    prefix_encoder = PrefixEncoder(PrefixEncoderConfig.from_dict(predictor_config)).to(device)
-    predictor = FutureLatentPredictor(FutureLatentPredictorConfig.from_dict(predictor_config)).to(device)
-
-    checkpoint_path = Path(predictor_config["training"]["checkpoint_dir"]) / "predictor_best.pt"
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    prefix_encoder.load_state_dict(checkpoint["prefix_encoder_state_dict"])
-    predictor.load_state_dict(checkpoint["predictor_state_dict"])
-
-    prefix_encoder.eval()
-    predictor.eval()
-    return prefix_encoder, predictor
 
 
 def iterative_refine_latent(
@@ -148,12 +129,9 @@ def main() -> None:
     parser.add_argument("--num-steps", type=int, default=None)
     parser.add_argument("--compare-num-steps", type=str, default=None)
     parser.add_argument("--compare-start-t", type=str, default=None)
-    parser.add_argument("--predictor-init-config", type=str, default=None)
-    parser.add_argument("--predictor-init-timestep", type=int, default=None)
     args = parser.parse_args()
 
     config = load_config(args.config)
-    predictor_config = load_config(args.predictor_init_config) if args.predictor_init_config is not None else None
 
     data_config = DataConfig.from_dict(config)
     data_config.batch_size = 1
@@ -162,11 +140,6 @@ def main() -> None:
 
     tokenizer, _, val_loader = build_dataloaders(data_config)
     autoencoder, context_encoder, denoiser = load_denoiser_components(config, device)
-    if predictor_config is not None:
-        prefix_encoder, predictor = load_predictor_components(predictor_config, device)
-    else:
-        prefix_encoder = None
-        predictor = None
 
     denoiser_config = LatentDenoiserConfig.from_dict(config)
     num_steps = args.num_steps or denoiser_config.num_diffusion_steps
@@ -210,28 +183,6 @@ def main() -> None:
             context_ids=context_ids,
             context_mask=context_mask,
         )
-        if prefix_encoder is not None and predictor is not None:
-            prefix_states = prefix_encoder(
-                prefix_ids=batch["prefix_ids"],
-                prefix_mask=batch["prefix_mask"],
-            )
-            predictor_init_latent = predictor(
-                prefix_states=prefix_states,
-                prefix_mask=batch["prefix_mask"],
-            )
-            predictor_init_logits = autoencoder.decode_latent(
-                latent=predictor_init_latent,
-                future_mask=batch["future_mask"],
-            )
-            if autoencoder.config.backbone_type == "bart":
-                predictor_init_prediction_ids = autoencoder.generate_from_latent(predictor_init_latent)
-            else:
-                predictor_init_prediction_ids = predictor_init_logits.argmax(dim=-1)
-            predictor_init_mse = torch.mean((predictor_init_latent - target_latent) ** 2).item()
-        else:
-            predictor_init_latent = None
-            predictor_init_prediction_ids = None
-            predictor_init_mse = None
 
         oracle_timestep = torch.full(
             (batch["future_ids"].size(0),),
@@ -279,11 +230,6 @@ def main() -> None:
     print("\nOracle Denoise From True Latent + Noise:")
     print(oracle_text)
     print(f"Oracle latent MSE to AE target: {oracle_latent_mse:.4f}")
-    if predictor_init_prediction_ids is not None and predictor_init_mse is not None:
-        predictor_init_text = decode_ids(tokenizer, predictor_init_prediction_ids[0].cpu())
-        print("\nPredictor Init:")
-        print(predictor_init_text)
-        print(f"Predictor init latent MSE to AE target: {predictor_init_mse:.4f}")
 
     for steps in num_steps_list:
         with torch.no_grad():
@@ -308,66 +254,6 @@ def main() -> None:
         print(f"\nDenoised Prediction ({steps} steps):")
         print(denoised_text)
         print(f"Latent MSE to AE target ({steps} steps): {latent_mse:.4f}")
-        if predictor_init_latent is not None and args.predictor_init_timestep is None:
-            with torch.no_grad():
-                refined_latent = iterative_refine_latent(
-                    denoiser=denoiser,
-                    noise_schedule=noise_schedule,
-                    context_states=context_states,
-                    context_mask=context_mask,
-                    num_steps=steps,
-                    start_latent=predictor_init_latent,
-                )
-                refined_logits = autoencoder.decode_latent(
-                    latent=refined_latent,
-                    future_mask=batch["future_mask"],
-                )
-                if autoencoder.config.backbone_type == "bart":
-                    refined_prediction_ids = autoencoder.generate_from_latent(refined_latent)
-                else:
-                    refined_prediction_ids = refined_logits.argmax(dim=-1)
-                refined_mse = torch.mean((refined_latent - target_latent) ** 2).item()
-
-            refined_text = decode_ids(tokenizer, refined_prediction_ids[0].cpu())
-            print(f"\nPredictor-Init Refined ({steps} steps):")
-            print(refined_text)
-            print(f"Predictor-init refined latent MSE to AE target ({steps} steps): {refined_mse:.4f}")
-
-    if predictor_init_latent is not None and args.predictor_init_timestep is not None:
-        if args.predictor_init_timestep < 0 or args.predictor_init_timestep >= denoiser_config.num_diffusion_steps:
-            raise ValueError(
-                f"predictor_init_timestep {args.predictor_init_timestep} is out of range for "
-                f"num_diffusion_steps={denoiser_config.num_diffusion_steps}."
-            )
-        alpha_bar = noise_schedule.alpha_bars[args.predictor_init_timestep].view(1, 1, 1)
-        predictor_noisy_start = predictor_init_latent + torch.sqrt(1.0 - alpha_bar) * torch.randn_like(predictor_init_latent)
-        with torch.no_grad():
-            refined_latent = iterative_refine_latent(
-                denoiser=denoiser,
-                noise_schedule=noise_schedule,
-                context_states=context_states,
-                context_mask=context_mask,
-                num_steps=args.predictor_init_timestep + 1,
-                start_latent=predictor_noisy_start,
-                start_timestep=args.predictor_init_timestep,
-            )
-            refined_logits = autoencoder.decode_latent(
-                latent=refined_latent,
-                future_mask=batch["future_mask"],
-            )
-            if autoencoder.config.backbone_type == "bart":
-                refined_prediction_ids = autoencoder.generate_from_latent(refined_latent)
-            else:
-                refined_prediction_ids = refined_logits.argmax(dim=-1)
-            refined_mse = torch.mean((refined_latent - target_latent) ** 2).item()
-
-        refined_text = decode_ids(tokenizer, refined_prediction_ids[0].cpu())
-        print(f"\nPredictor-Noisy-Init Refined (start t={args.predictor_init_timestep}):")
-        print(refined_text)
-        print(
-            f"Predictor-noisy-init refined latent MSE to AE target (start t={args.predictor_init_timestep}): "
-            f"{refined_mse:.4f}"
-        )
 
     for start_t in start_t_list:
         if start_t < 0 or start_t >= denoiser_config.num_diffusion_steps:
@@ -402,7 +288,7 @@ def main() -> None:
                 denoised_prediction_ids = denoised_logits.argmax(dim=-1)
             latent_mse = torch.mean((denoised_latent - target_latent) ** 2).item()
 
-        denoised_text = decode_ids(tokenizer, denoised_prediction_ids[0].cpu())
+            denoised_text = decode_ids(tokenizer, denoised_prediction_ids[0].cpu())
         print(f"\nDenoised Prediction (start from target noise t={start_t}):")
         print(denoised_text)
         print(f"Latent MSE to AE target (start t={start_t}): {latent_mse:.4f}")

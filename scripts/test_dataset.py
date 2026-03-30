@@ -13,7 +13,7 @@ from src.data.dataset import DataConfig, build_dataloaders
 
 
 def main() -> None:
-    with open("configs/ae.yaml", "r", encoding="utf-8") as file:
+    with open("configs/ae_bart_latent_qqp.yaml", "r", encoding="utf-8") as file:
         config = yaml.safe_load(file)
 
     data_config = DataConfig.from_dict(config)
@@ -31,8 +31,8 @@ def main() -> None:
 
     prefix_text = tokenizer.decode(batch["prefix_ids"][0].tolist(), skip_special_tokens=True)
     future_text = tokenizer.decode(batch["future_ids"][0].tolist(), skip_special_tokens=True)
-    print(f"prefix example: {prefix_text}")
-    print(f"future example: {future_text}")
+    print(f"source example: {prefix_text}")
+    print(f"target example: {future_text}")
 
 
 if __name__ == "__main__":

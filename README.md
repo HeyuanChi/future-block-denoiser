@@ -1,43 +1,16 @@
 # Future Block Denoiser
 
-Minimal Stage 1 prototype for an NLP seminar project on non-traditional next-token generation.
+Current working direction:
 
-The current codebase now implements:
+- `QQP` seq2seq paraphrase data
+- a frozen `facebook/bart-base` language autoencoder with a perceiver latent bottleneck
+- direct latent diffusion on top of that AE
 
-- WikiText-2 raw dataset loading and fixed-window slicing
-- A future-block autoencoder with a frozen BERT-based encoder
-- A lightweight Transformer decoder for token reconstruction
-- A plain PyTorch training script for the autoencoder
-- A prefix-conditioned latent denoiser trained against AE latents
+The codebase is intentionally trimmed to this main path:
 
-## Project Structure
-
-```text
-future-block-denoiser/
-├── README.md
-├── requirements.txt
-├── configs/
-│   ├── ae.yaml
-│   └── denoiser.yaml
-├── src/
-│   ├── data/
-│   │   ├── __init__.py
-│   │   └── dataset.py
-│   ├── models/
-│   │   ├── __init__.py
-│   │   └── future_autoencoder.py
-│   ├── training/
-│   │   ├── __init__.py
-│   │   └── train_ae.py
-│   └── utils/
-│       ├── __init__.py
-│       └── metrics.py
-├── scripts/
-│   └── test_dataset.py
-└── outputs/
-    ├── checkpoints/
-    └── logs/
-```
+- train a BART latent AE on `QQP`
+- train a direct latent denoiser against AE latents
+- inspect reconstructions and denoised generations
 
 ## Install
 
@@ -54,30 +27,28 @@ python scripts/test_dataset.py
 ## Train The Autoencoder
 
 ```bash
-python -m src.training.train_ae --config configs/ae.yaml
+python -m src.training.train_ae --config configs/ae_bart_latent_qqp.yaml
 ```
 
-Metrics are appended to `outputs/logs/ae_train.jsonl`.
+Metrics are appended to `outputs/logs/ae_bart_latent_qqp/ae_train.jsonl`.
 
 ## Train The Denoiser
 
-Train the autoencoder first so `outputs/checkpoints/ae_best.pt` exists.
+Train the autoencoder first so `outputs/checkpoints/ae_bart_latent_qqp/ae_best.pt` exists.
 
 ```bash
-python -m src.training.train_denoiser --config configs/denoiser.yaml
+python -m src.training.train_denoiser --config configs/denoiser_bart_latent_qqp.yaml
 ```
 
-Metrics are appended to `outputs/logs/denoiser_train.jsonl`.
-The denoiser is trained to predict diffusion noise in latent space.
-
-To continue denoiser training from an existing checkpoint, set
-`training.resume_from_checkpoint` in `configs/denoiser.yaml`.
+Metrics are appended to `outputs/logs/denoiser_bart_latent_qqp/denoiser_train.jsonl`.
+The denoiser is trained in latent space with `x0` prediction, self-conditioning,
+`sqrt` noise schedule, and loss-aware timestep sampling.
 
 ## Run Inference
 
 ```bash
-python scripts/run_inference.py --config configs/denoiser.yaml
+python scripts/run_inference.py --config configs/denoiser_bart_latent_qqp.yaml --sample-index 0 --compare-num-steps 10,25,50
 ```
 
-This prints a validation prefix, the ground-truth future block, the AE
-reconstruction, and the denoiser-based future prediction.
+This prints the `QQP` source, target, AE reconstruction, oracle denoise, and
+direct denoiser generations at different reverse-step counts.
