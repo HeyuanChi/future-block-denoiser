@@ -116,6 +116,19 @@ def decode_ids(tokenizer, token_ids: torch.Tensor) -> str:
     return tokenizer.decode(token_ids.tolist(), skip_special_tokens=True)
 
 
+def teacher_forced_prediction_ids(logits: torch.Tensor, target_ids: torch.Tensor) -> torch.Tensor:
+    prediction_ids = logits.argmax(dim=-1)
+    if prediction_ids.size(1) == target_ids.size(1):
+        return prediction_ids
+
+    if prediction_ids.size(1) > target_ids.size(1):
+        return prediction_ids[:, : target_ids.size(1)]
+
+    pad_width = target_ids.size(1) - prediction_ids.size(1)
+    pad_value = 1
+    return torch.nn.functional.pad(prediction_ids, (0, pad_width), value=pad_value)
+
+
 def source_target_labels(task_mode: str) -> tuple[str, str]:
     if task_mode == "seq2seq":
         return "Source", "Target"
@@ -173,6 +186,7 @@ def main() -> None:
             future_ids=batch["future_ids"],
             future_mask=batch["future_mask"],
         )
+        ae_teacher_forced_ids = teacher_forced_prediction_ids(ae_logits, batch["future_ids"])
         if autoencoder.config.backbone_type == "bart":
             ae_prediction_ids = autoencoder.generate_from_latent(target_latent)
         else:
@@ -207,7 +221,9 @@ def main() -> None:
         oracle_logits = autoencoder.decode_latent(
             latent=oracle_latent,
             future_mask=batch["future_mask"],
+            target_ids=batch["future_ids"],
         )
+        oracle_teacher_forced_ids = teacher_forced_prediction_ids(oracle_logits, batch["future_ids"])
         if autoencoder.config.backbone_type == "bart":
             oracle_prediction_ids = autoencoder.generate_from_latent(oracle_latent)
         else:
@@ -217,7 +233,9 @@ def main() -> None:
 
     prefix_text = decode_ids(tokenizer, batch["prefix_ids"][0].cpu())
     future_text = decode_ids(tokenizer, batch["future_ids"][0].cpu())
+    ae_teacher_forced_text = decode_ids(tokenizer, ae_teacher_forced_ids[0].cpu())
     ae_text = decode_ids(tokenizer, ae_prediction_ids[0].cpu())
+    oracle_teacher_forced_text = decode_ids(tokenizer, oracle_teacher_forced_ids[0].cpu())
     oracle_text = decode_ids(tokenizer, oracle_prediction_ids[0].cpu())
     source_label, target_label = source_target_labels(data_config.task_mode)
 
@@ -225,9 +243,13 @@ def main() -> None:
     print(prefix_text)
     print(f"\n{target_label}:")
     print(future_text)
-    print("\nAE Reconstruction:")
+    print("\nAE Reconstruction (Teacher Forced):")
+    print(ae_teacher_forced_text)
+    print("\nAE Reconstruction (Free Run):")
     print(ae_text)
-    print("\nOracle Denoise From True Latent + Noise:")
+    print("\nOracle Denoise (Teacher Forced):")
+    print(oracle_teacher_forced_text)
+    print("\nOracle Denoise From True Latent + Noise (Free Run):")
     print(oracle_text)
     print(f"Oracle latent MSE to AE target: {oracle_latent_mse:.4f}")
 

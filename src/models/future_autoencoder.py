@@ -548,11 +548,10 @@ class FutureAutoencoder(nn.Module):
         generated_ids = self.seq2seq_backbone.generate(
             encoder_outputs=encoder_outputs,
             attention_mask=encoder_mask,
-            max_length=self.config.future_len + 1,
-            min_length=self.config.future_len + 1,
+            max_new_tokens=self.config.future_len,
             num_beams=1,
         )
-        generated_ids = generated_ids[:, 1 : self.config.future_len + 1]
+        generated_ids = generated_ids[:, 1:]
         vocab_size = self.seq2seq_backbone.config.vocab_size
         logits = F.one_hot(generated_ids, num_classes=vocab_size).float()
         return logits * 100.0
@@ -574,11 +573,10 @@ class FutureAutoencoder(nn.Module):
         generated_ids = self.seq2seq_backbone.generate(
             encoder_outputs=encoder_outputs,
             attention_mask=encoder_mask,
-            max_length=self.config.future_len + 1,
-            min_length=self.config.future_len + 1,
+            max_new_tokens=self.config.future_len,
             num_beams=1,
         )
-        return generated_ids[:, 1 : self.config.future_len + 1]
+        return generated_ids[:, 1:]
 
     def forward(
         self,
