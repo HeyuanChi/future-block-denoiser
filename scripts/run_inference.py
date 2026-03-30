@@ -135,9 +135,15 @@ def decode_ids(tokenizer, token_ids: torch.Tensor) -> str:
     return tokenizer.decode(token_ids.tolist(), skip_special_tokens=True)
 
 
+def source_target_labels(task_mode: str) -> tuple[str, str]:
+    if task_mode == "seq2seq":
+        return "Source", "Target"
+    return "Prefix", "Ground Truth Future"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="configs/denoiser.yaml")
+    parser.add_argument("--config", type=str, default="configs/denoiser_bart_latent_qqp.yaml")
     parser.add_argument("--sample-index", type=int, default=0)
     parser.add_argument("--num-steps", type=int, default=None)
     parser.add_argument("--compare-num-steps", type=str, default=None)
@@ -194,7 +200,10 @@ def main() -> None:
             future_ids=batch["future_ids"],
             future_mask=batch["future_mask"],
         )
-        ae_prediction_ids = ae_logits.argmax(dim=-1)
+        if autoencoder.config.backbone_type == "bart":
+            ae_prediction_ids = autoencoder.generate_from_latent(target_latent)
+        else:
+            ae_prediction_ids = ae_logits.argmax(dim=-1)
 
         context_ids, context_mask = build_context_inputs(batch)
         context_states = context_encoder(
@@ -214,7 +223,10 @@ def main() -> None:
                 latent=predictor_init_latent,
                 future_mask=batch["future_mask"],
             )
-            predictor_init_prediction_ids = predictor_init_logits.argmax(dim=-1)
+            if autoencoder.config.backbone_type == "bart":
+                predictor_init_prediction_ids = autoencoder.generate_from_latent(predictor_init_latent)
+            else:
+                predictor_init_prediction_ids = predictor_init_logits.argmax(dim=-1)
             predictor_init_mse = torch.mean((predictor_init_latent - target_latent) ** 2).item()
         else:
             predictor_init_latent = None
@@ -245,7 +257,10 @@ def main() -> None:
             latent=oracle_latent,
             future_mask=batch["future_mask"],
         )
-        oracle_prediction_ids = oracle_logits.argmax(dim=-1)
+        if autoencoder.config.backbone_type == "bart":
+            oracle_prediction_ids = autoencoder.generate_from_latent(oracle_latent)
+        else:
+            oracle_prediction_ids = oracle_logits.argmax(dim=-1)
 
         oracle_latent_mse = torch.mean((oracle_latent - target_latent) ** 2).item()
 
@@ -253,10 +268,11 @@ def main() -> None:
     future_text = decode_ids(tokenizer, batch["future_ids"][0].cpu())
     ae_text = decode_ids(tokenizer, ae_prediction_ids[0].cpu())
     oracle_text = decode_ids(tokenizer, oracle_prediction_ids[0].cpu())
+    source_label, target_label = source_target_labels(data_config.task_mode)
 
-    print("\nPrefix:")
+    print(f"\n{source_label}:")
     print(prefix_text)
-    print("\nGround Truth Future:")
+    print(f"\n{target_label}:")
     print(future_text)
     print("\nAE Reconstruction:")
     print(ae_text)
@@ -282,7 +298,10 @@ def main() -> None:
                 latent=denoised_latent,
                 future_mask=batch["future_mask"],
             )
-            denoised_prediction_ids = denoised_logits.argmax(dim=-1)
+            if autoencoder.config.backbone_type == "bart":
+                denoised_prediction_ids = autoencoder.generate_from_latent(denoised_latent)
+            else:
+                denoised_prediction_ids = denoised_logits.argmax(dim=-1)
             latent_mse = torch.mean((denoised_latent - target_latent) ** 2).item()
 
         denoised_text = decode_ids(tokenizer, denoised_prediction_ids[0].cpu())
@@ -303,7 +322,10 @@ def main() -> None:
                     latent=refined_latent,
                     future_mask=batch["future_mask"],
                 )
-                refined_prediction_ids = refined_logits.argmax(dim=-1)
+                if autoencoder.config.backbone_type == "bart":
+                    refined_prediction_ids = autoencoder.generate_from_latent(refined_latent)
+                else:
+                    refined_prediction_ids = refined_logits.argmax(dim=-1)
                 refined_mse = torch.mean((refined_latent - target_latent) ** 2).item()
 
             refined_text = decode_ids(tokenizer, refined_prediction_ids[0].cpu())
@@ -333,7 +355,10 @@ def main() -> None:
                 latent=refined_latent,
                 future_mask=batch["future_mask"],
             )
-            refined_prediction_ids = refined_logits.argmax(dim=-1)
+            if autoencoder.config.backbone_type == "bart":
+                refined_prediction_ids = autoencoder.generate_from_latent(refined_latent)
+            else:
+                refined_prediction_ids = refined_logits.argmax(dim=-1)
             refined_mse = torch.mean((refined_latent - target_latent) ** 2).item()
 
         refined_text = decode_ids(tokenizer, refined_prediction_ids[0].cpu())
@@ -371,7 +396,10 @@ def main() -> None:
                 latent=denoised_latent,
                 future_mask=batch["future_mask"],
             )
-            denoised_prediction_ids = denoised_logits.argmax(dim=-1)
+            if autoencoder.config.backbone_type == "bart":
+                denoised_prediction_ids = autoencoder.generate_from_latent(denoised_latent)
+            else:
+                denoised_prediction_ids = denoised_logits.argmax(dim=-1)
             latent_mse = torch.mean((denoised_latent - target_latent) ** 2).item()
 
         denoised_text = decode_ids(tokenizer, denoised_prediction_ids[0].cpu())

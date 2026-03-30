@@ -1,0 +1,50 @@
+data:
+  dataset_name: glue
+  dataset_config: qqp
+  tokenizer_name: facebook/bart-base
+  task_mode: seq2seq
+  train_split: train
+  val_split: validation
+  source_field: question1
+  target_field: question2
+  prefix_len: 32
+  future_len: 32
+  batch_size: 128
+  num_workers: 8
+  max_train_samples: null
+  max_val_samples: null
+
+model:
+  bert_name: facebook/bart-base
+  backbone_type: bart
+  latent_dim: 512
+  prefix_len: 32
+  future_len: 32
+  coarse_slots: 8
+  decoder_latents: 32
+  latent_bottleneck_depth: 2
+  l2_normalize_latents: true
+  freeze_backbone: true
+  slot_refinement: none
+  num_diffusion_steps: 50
+  noise_schedule: sqrt
+  timestep_sampling: loss_aware
+  self_conditioning: true
+  denoiser_layers: 4
+  denoiser_heads: 8
+  denoiser_ffn_dim: 2048
+  denoiser_dropout: 0.1
+
+training:
+  ae_checkpoint_path: outputs/checkpoints/ae_bart_latent_qqp/ae_best.pt
+  learning_rate: 0.0001
+  weight_decay: 0.0
+  num_epochs: 100
+  device: auto
+  log_every: 100
+  checkpoint_dir: outputs/checkpoints/denoiser_bart_latent_qqp
+  log_dir: outputs/logs/denoiser_bart_latent_qqp
+  save_every_epoch: false
+  grad_clip_norm: 1.0
+  warmup_ratio: 0.05
+  condition_drop_prob: 0.1

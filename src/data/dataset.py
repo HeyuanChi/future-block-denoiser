@@ -15,6 +15,10 @@ class DataConfig:
     dataset_config: str = "wikitext-2-raw-v1"
     tokenizer_name: str = "bert-base-uncased"
     task_mode: str = "future"
+    train_split: str = "train"
+    val_split: str = "validation"
+    source_field: str = "text"
+    target_field: str = "text"
     prefix_len: int = 64
     future_len: int = 16
     suffix_len: int = 0
@@ -100,6 +104,78 @@ class PrefixFutureDataset(Dataset[dict[str, torch.Tensor]]):
         return self.samples[index]
 
 
+class Seq2SeqDataset(Dataset[dict[str, torch.Tensor]]):
+    """Dataset of fixed source-target pairs for seq2seq training."""
+
+    def __init__(
+        self,
+        rows: list[dict[str, Any]],
+        tokenizer: PreTrainedTokenizerBase,
+        source_field: str,
+        target_field: str,
+        source_len: int,
+        target_len: int,
+        max_samples: int | None = None,
+    ) -> None:
+        if max_samples is not None:
+            rows = rows[:max_samples]
+        self.samples = self._build_samples(
+            rows=rows,
+            tokenizer=tokenizer,
+            source_field=source_field,
+            target_field=target_field,
+            source_len=source_len,
+            target_len=target_len,
+        )
+
+    def _build_samples(
+        self,
+        rows: list[dict[str, Any]],
+        tokenizer: PreTrainedTokenizerBase,
+        source_field: str,
+        target_field: str,
+        source_len: int,
+        target_len: int,
+    ) -> list[dict[str, torch.Tensor]]:
+        samples: list[dict[str, torch.Tensor]] = []
+        for row in rows:
+            source_text = str(row[source_field]).strip()
+            target_text = str(row[target_field]).strip()
+            if not source_text or not target_text:
+                continue
+
+            source_encoding = tokenizer(
+                source_text,
+                padding="max_length",
+                truncation=True,
+                max_length=source_len,
+                return_tensors="pt",
+            )
+            target_encoding = tokenizer(
+                target_text,
+                padding="max_length",
+                truncation=True,
+                max_length=target_len,
+                return_tensors="pt",
+            )
+
+            samples.append(
+                {
+                    "prefix_ids": source_encoding["input_ids"][0].long(),
+                    "prefix_mask": source_encoding["attention_mask"][0].long(),
+                    "future_ids": target_encoding["input_ids"][0].long(),
+                    "future_mask": target_encoding["attention_mask"][0].long(),
+                }
+            )
+        return samples
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+        return self.samples[index]
+
+
 def build_tokenizer(tokenizer_name: str) -> PreTrainedTokenizerBase:
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
     # We tokenize a very long concatenated corpus and then slice fixed windows ourselves.
@@ -111,6 +187,11 @@ def build_tokenizer(tokenizer_name: str) -> PreTrainedTokenizerBase:
 def load_split_texts(dataset_name: str, dataset_config: str, split: str) -> list[str]:
     dataset = load_dataset(dataset_name, dataset_config, split=split)
     return [row["text"] for row in dataset if row["text"].strip()]
+
+
+def load_split_rows(dataset_name: str, dataset_config: str, split: str) -> list[dict[str, Any]]:
+    dataset = load_dataset(dataset_name, dataset_config, split=split)
+    return [dict(row) for row in dataset]
 
 
 def tokenize_texts(
@@ -131,8 +212,20 @@ def build_dataset(
     config: DataConfig,
     split: str,
     tokenizer: PreTrainedTokenizerBase,
-) -> PrefixFutureDataset:
+) -> Dataset[dict[str, torch.Tensor]]:
     max_samples = config.max_train_samples if split == "train" else config.max_val_samples
+    if config.task_mode == "seq2seq":
+        rows = load_split_rows(config.dataset_name, config.dataset_config, split)
+        return Seq2SeqDataset(
+            rows=rows,
+            tokenizer=tokenizer,
+            source_field=config.source_field,
+            target_field=config.target_field,
+            source_len=config.prefix_len,
+            target_len=config.future_len,
+            max_samples=max_samples,
+        )
+
     texts = load_split_texts(config.dataset_name, config.dataset_config, split)
     token_ids = tokenize_texts(texts, tokenizer)
     return PrefixFutureDataset(
@@ -150,8 +243,8 @@ def build_dataloaders(
     config: DataConfig,
 ) -> tuple[PreTrainedTokenizerBase, DataLoader[dict[str, torch.Tensor]], DataLoader[dict[str, torch.Tensor]]]:
     tokenizer = build_tokenizer(config.tokenizer_name)
-    train_dataset = build_dataset(config, split="train", tokenizer=tokenizer)
-    val_dataset = build_dataset(config, split="validation", tokenizer=tokenizer)
+    train_dataset = build_dataset(config, split=config.train_split, tokenizer=tokenizer)
+    val_dataset = build_dataset(config, split=config.val_split, tokenizer=tokenizer)
 
     train_loader = DataLoader(
         train_dataset,

@@ -157,7 +157,7 @@ def append_epoch_log(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="configs/ae.yaml")
+    parser.add_argument("--config", type=str, default="configs/ae_bart_latent_qqp.yaml")
     args = parser.parse_args()
 
     config = load_config(args.config)

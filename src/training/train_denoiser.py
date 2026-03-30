@@ -38,6 +38,7 @@ class DenoiserTrainConfig:
     save_every_epoch: bool = True
     grad_clip_norm: float | None = 1.0
     warmup_ratio: float = 0.05
+    condition_drop_prob: float = 0.0
 
     @classmethod
     def from_dict(cls, config: dict[str, Any]) -> "DenoiserTrainConfig":
@@ -75,6 +76,7 @@ def run_epoch(
     scheduler: LambdaLR | None,
     log_every: int,
     grad_clip_norm: float | None,
+    condition_drop_prob: float,
 ) -> float:
     is_train = optimizer is not None
     context_encoder.train(is_train)
@@ -110,6 +112,9 @@ def run_epoch(
             context_ids=context_ids,
             context_mask=context_mask,
         )
+        if condition_drop_prob > 0.0 and torch.rand(()) < condition_drop_prob:
+            context_states = torch.zeros_like(context_states)
+            context_mask = torch.zeros_like(context_mask)
         self_condition_latent = None
         if denoiser.config.self_conditioning and torch.rand(()) < 0.5:
             with torch.no_grad():
@@ -210,7 +215,7 @@ def append_epoch_log(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="configs/denoiser.yaml")
+    parser.add_argument("--config", type=str, default="configs/denoiser_bart_latent_qqp.yaml")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -282,6 +287,7 @@ def main() -> None:
             scheduler=scheduler,
             log_every=train_config.log_every,
             grad_clip_norm=train_config.grad_clip_norm,
+            condition_drop_prob=train_config.condition_drop_prob,
         )
 
         with torch.no_grad():
@@ -296,6 +302,7 @@ def main() -> None:
                 scheduler=None,
                 log_every=train_config.log_every,
                 grad_clip_norm=None,
+                condition_drop_prob=0.0,
             )
 
         print(f"train_loss: {train_loss:.4f}")
